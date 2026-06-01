@@ -40,10 +40,23 @@ class DG1DSolver:
         Computes the Lagrange basis functions on the reference element [-1, 1] and stores them in a matrix.
     reconstruct_x() -> (D, L) array
         Maps reference element points epsilon in [-1,1] to physical coordinates for all DG elements.
+    reconstruct_x_at_nodes() -> (D, N+1) array
+        Maps reference element nodes epsilon in [-1,1] to physical coordinates for all DG elements.
     initialize_solution(u0) -> None
         Initializes the solution coefficients u[j, i] by projecting a given function onto the basis functions.
     compute_MassMatrix() -> None
         Computes the reference-element mass matrix and its inverse.
+    gauss_lobatto_nodes() -> (N+1,) array
+        Computes the Gauss-Lobatto nodes for a given number of basis functions N.
+    gauss_lobatto_weights() -> (N+1,) array
+        Computes Gauss-Lobatto-Legendre quadrature weights on [-1,1].
+    error_in_u0(u0) -> None
+        Computes the maximum error between the reconstructed solution uh and the exact solution u0.
+    
+    Functions
+    ---------
+    gaussian(x) -> (shape(x)) array
+        A Gaussian function.
     """
     def __init__(self, x_grid : npt.NDArray[np.float64], N: int, L: int):
         self.D = len(x_grid) - 1
@@ -59,14 +72,14 @@ class DG1DSolver:
  
     def lagrange_basis_matrix(self):
         """
-        Lagrange basis functions on the reference element [-1, 1] stored in a matrix.
+        Lagrange basis functions on the reference element [-1, 1] defined by the Gauss-Lobatto nodes.
 
         Stores
         -------
         Phi_q : (N+1, N+1) array
             Phi_q[j, m] = phi_j(xi_m) where xi_m are the Gauss-Lobatto nodes.
         Phi_plot : (N+1, L) array
-            Phi[j, k] = phi_j(epsilon_k)
+            Phi[j, k] = phi_j(epsilon_k) on a dense grid of L points for plotting and error analysis.
         """
 
         # reference nodes (interpolation nodes)
@@ -158,7 +171,7 @@ class DG1DSolver:
 
         x_grid = np.asarray(self.x, dtype=np.float64)
 
-        x_reconstructed = np.zeros((self.D, self.N + 1), dtype=np.float64)
+        x_reconstructed_at_nodes = np.zeros((self.D, self.N + 1), dtype=np.float64)
 
         for j in range(self.D):
             x_left = x_grid[j]
@@ -166,9 +179,9 @@ class DG1DSolver:
 
             dx = x_right - x_left
 
-            x_reconstructed[j, :] = x_left + 0.5 * dx * (self.xi_nodes + 1.0)
+            x_reconstructed_at_nodes[j, :] = x_left + 0.5 * dx * (self.xi_nodes + 1.0)
 
-        return x_reconstructed
+        return x_reconstructed_at_nodes
          
     def compute_MassMatrix(self) -> None:
         """
@@ -176,7 +189,7 @@ class DG1DSolver:
 
             M_ij = ∫_{-1}^{1} phi_i(epsilon) phi_j(epsilon) d epsilon
 
-        using the same epsilon grid used to construct self.Phi.
+        using the Gauss-Lobatto quadrature rule. 
 
         Stores
         -------
@@ -205,13 +218,6 @@ class DG1DSolver:
         uh = self.u @ self.Phi_plot
 
         error = np.sqrt(np.mean((uh-u_exact)**2))
-
-        #print("reconstructed: ", uh)
-        #print("exact: ", u_exact)
-        #print("coefficients: ", self.u)
-        #print("inverse mass matrix: ", self.inv_M)
-        #print("mass matrix: ", self.M)
-        #print("basis functions: ", self.Phi)
 
         print("L2 error =", error)
 
