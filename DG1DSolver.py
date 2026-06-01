@@ -16,11 +16,19 @@ class DG1DSolver:
     L : int
         Number of evaluation points for basis functions on epsilon [-1,1].
     u : (D, N+1) array
-        Coefficients of the solution in each cell D and for each basis function N.
+        Coefficients of the DOF in each cell D and for each basis function N.
     x : (D+1,) array
-        Grid points defining the cell boundaries.
-    phi : (N+1, L) array
-        Lagrange basis functions evaluated at L points in the reference element [-1, 1].
+        Physical grid points defining the cell boundaries.
+    xi_nodes : (N+1,) array
+        Gauss-Lobatto nodes on the reference element [-1, 1].
+    quad_weights : (N+1,) array
+        Quadrature weights for the Gauss-Lobatto nodes.
+    h : (D,) array
+        Cell widths used for physical coordinate mapping.
+    phi_q : (N+1, N+1) array
+        Lagrange basis functions evaluated on guass-lobatto nodes.
+    phi_plot : (N+1, L) array
+        Lagrange basis functions evaluated on a dense grid for plotting.
     M : (N+1, N+1) array
         Reference mass matrix.
     inv_M : (N+1, N+1) array
@@ -42,10 +50,8 @@ class DG1DSolver:
         self.N = N
         self.L = L
 
-        # u[j, i] jth cell and ith basis function coefficient
-        # self.u = np.zeros((self.D, self.N + 1))
-
         self.x = x_grid
+        self.h = (self.x[1:] - self.x[:-1]) / 2.0
 
         self.lagrange_basis_matrix()
         self.quad_weights = self.gauss_lobatto_weights()
@@ -185,6 +191,7 @@ class DG1DSolver:
 
         for i in range(self.N + 1):
             for j in range(self.N + 1):
+
                 M[i, j] = np.sum(
                     self.quad_weights * self.Phi_q[i, :] * self.Phi_q[j, :],
                 )

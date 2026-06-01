@@ -14,6 +14,8 @@ solver = DG1DSolver.DG1DSolver(x_grid, N, L)
 solver.initialize_solution(DG1DSolver.gaussian)
 solver.error_in_u0(DG1DSolver.gaussian)
 
+print(solver.Phi_plot)
+
 
 
 
