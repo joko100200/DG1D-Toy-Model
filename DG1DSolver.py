@@ -64,11 +64,14 @@ class DG1DSolver:
         self.L = L
 
         self.x = x_grid
-        self.h = (self.x[1:] - self.x[:-1]) / 2.0
+        self.h = (self.x[1:] - self.x[:-1])/2.0
 
         self.lagrange_basis_matrix()
         self.quad_weights = self.gauss_lobatto_weights()
         self.compute_MassMatrix()
+        self.calculate_D_Phi()
+
+        self.x_nodes = self.reconstruct_x_at_nodes()
  
     def lagrange_basis_matrix(self):
         """
@@ -262,6 +265,141 @@ class DG1DSolver:
 
         return weights
 
+    def calculate_D_Phi(self):
+        """Calculate the derivative matrix D_Phi for the Lagrange basis functions at GL nodes."""
+
+        Np = self.N + 1
+        x = self.xi_nodes
+
+        # Barycentric weights
+        lam = np.ones(Np, dtype=np.float64)
+
+        for j in range(Np):
+            for m in range(Np):
+                if m != j:
+                    lam[j] /= (x[j] - x[m])
+
+        # Derivative matrix:
+        # D_Phi[i, j] = phi_j'(x_i)
+        D_Phi = np.zeros((Np, Np), dtype=np.float64)
+
+        for i in range(Np):
+            for j in range(Np):
+                if i != j:
+                    D_Phi[i, j] = (
+                        lam[j]
+                        / lam[i]
+                        / (x[i] - x[j])
+                    )
+
+        for i in range(Np):
+            D_Phi[i, i] = -np.sum(D_Phi[i])
+
+        self.D_Phi = D_Phi
+
+    def rhs(self, u : npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        """Returns all the RHS values for each element."""
+        rhs_all = np.zeros_like(u)
+
+        for e in range(self.D):
+            rhs_all[e] = self.rhs_element(e, u)
+        
+        return rhs_all
+
+    def rhs_element(self, e, u : npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        
+        u_e    = u[e]
+        x_e    = self.x_nodes[e]
+        a_e    = a(x_e)                                        # a at physical nodes
+
+        # volume term
+        vol = self.D_Phi.T @ (self.quad_weights * a_e * u_e)
+
+        # flux vector b
+        f_left, f_right = self.numerical_flux(u, e)
+        b      = np.zeros(self.N + 1)
+        b[0]   = -f_left
+        b[-1]  = +f_right
+
+        return (1.0 / self.h[e]) * (self.inv_M @ (vol - b))
+    
+    def numerical_flux(self, u, e):
+        xL = self.x[e]
+        xR = self.x[e + 1]
+        aL = a(xL)
+        aR = a(xR)
+
+        # left face
+        u_minus_L = u[e - 1, -1] if e > 0 else u[-1, -1]  # periodic
+        u_plus_L  = u[e, 0]
+        f_left    = aL * u_minus_L if aL >= 0 else aL * u_plus_L
+
+        # right face
+        u_minus_R = u[e, -1]
+        u_plus_R  = u[e + 1, 0] if e < self.D - 1 else u[0, 0]  # periodic
+        f_right   = aR * u_minus_R if aR >= 0 else aR * u_plus_R
+
+        return f_left, f_right
+
+    def compute_dt(self, cfl):
+        x = self.reconstruct_x_at_nodes()
+        a_max = 0.0
+
+        for e in range(self.D):
+            a_vals = a(x[e])
+            a_max = max(a_max, np.max(np.abs(a_vals)))
+
+        h_min = np.min(self.h)
+
+        return cfl * h_min / ((2*self.N + 1) * a_max)
+
+    def step_rk4(self, dt):
+        u0 = self.u.copy()
+
+        k1 = self.rhs(u0)
+        k2 = self.rhs(u0 + 0.5 * dt * k1)
+        k3 = self.rhs(u0 + 0.5 * dt * k2)
+        k4 = self.rhs(u0 + dt * k3)
+
+        self.u = u0 + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
+    
+    def run(self, T, cfl=0.5):
+        t = 0.0
+        dt = self.compute_dt(cfl)
+        print("t=0 L2 error = ", self.L2_error(0.0))
+
+        while t < T:
+            if t + dt > T:
+                dt = T - t
+
+            self.step_rk4(dt)
+            t += dt
+
+            print("t =", t, ", L2 error =", self.L2_error(t))
+
+        return self.u
+
+    def L2_error(self, t):
+
+        err = 0.0
+
+        for e in range(self.D):
+
+            x_e = self.reconstruct_x_at_nodes()[e]
+
+            u_exact = gaussian(x_e - t)   # <-- THIS is the key advection shift
+            u_h = self.u[e]
+
+            err += np.sum(
+                self.quad_weights * (u_h - u_exact)**2
+            ) * self.h[e]
+
+        return np.sqrt(err)
+
 def gaussian(x : npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
     """A Gaussian function centered at 0 with standard deviation 1."""
-    return np.asarray(1 / np.sqrt(2 * np.pi) * np.exp(-0.5 * x**2), dtype=np.float64)
+    return np.asarray(np.exp(-0.5 * x**2), dtype=np.float64)
+
+def a (x : npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+    """A variable wave speed function."""
+    return np.ones_like(x, dtype=np.float64)
