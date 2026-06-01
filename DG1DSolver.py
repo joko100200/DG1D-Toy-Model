@@ -1,5 +1,6 @@
 import numpy as np
 import numpy.typing as npt
+from numpy.polynomial.legendre import Legendre
 from collections.abc import Callable
 
 class DG1DSolver:
@@ -47,6 +48,7 @@ class DG1DSolver:
         self.x = x_grid
 
         self.lagrange_basis_matrix()
+        self.quad_weights = self.gauss_lobatto_weights()
         self.compute_MassMatrix()
  
     def lagrange_basis_matrix(self):
@@ -55,31 +57,37 @@ class DG1DSolver:
 
         Stores
         -------
-        Phi : (N+1, L) array
+        Phi_q : (N+1, N+1) array
+            Phi_q[j, m] = phi_j(xi_m) where xi_m are the Gauss-Lobatto nodes.
+        Phi_plot : (N+1, L) array
             Phi[j, k] = phi_j(epsilon_k)
         """
 
         # reference nodes (interpolation nodes)
-        self.xi_nodes = np.linspace(-1.0, 1.0, self.N + 1)
+        self.xi_nodes = self.gauss_lobatto_nodes()
 
         # evaluation grid
-        self.quad_points = np.linspace(-1.0, 1.0, self.L)
+        self.grid_points = np.linspace(-1.0, 1.0, self.L, dtype=np.float64)
 
-        Phi = np.zeros((self.N + 1, self.L), dtype=float)
+        Phi_q = np.zeros((self.N + 1, self.N + 1))  # nodal basis at nodal points
+        Phi_plot = np.zeros((self.N + 1, self.L))   # dense grid for plotting
 
         for j in range(self.N + 1):
-            # start with ones
-            lj = np.ones_like(self.quad_points, dtype=float)
+            lj_q = np.ones(self.N + 1)
+            lj_p = np.ones(self.L)
 
             xj = self.xi_nodes[j]
 
             for m, xm in enumerate(self.xi_nodes):
                 if m != j:
-                    lj *= (self.quad_points - xm) / (xj - xm)
+                    lj_q *= (self.xi_nodes - xm) / (xj - xm)
+                    lj_p *= (self.grid_points - xm) / (xj - xm)
 
-            Phi[j, :] = lj
+            Phi_q[j, :] = lj_q
+            Phi_plot[j, :] = lj_p
 
-        self.Phi = Phi
+        self.Phi_q = Phi_q
+        self.Phi_plot = Phi_plot
     
     def reconstruct_x(self) -> npt.NDArray[np.float64]:
         """
@@ -93,7 +101,7 @@ class DG1DSolver:
         """
 
         x_grid = np.asarray(self.x, dtype=np.float64)
-        epsilon = np.linspace(-1.0, 1.0, self.L, dtype=np.float64)
+        epsilon = self.grid_points
 
         x_reconstructed = np.zeros((self.D, self.L), dtype=np.float64)
 
@@ -118,22 +126,43 @@ class DG1DSolver:
             A function that a vectorized argument and returns a value for all elements.
         """
 
-        ui = u0(self.reconstruct_x())
-        epsilon = np.linspace(-1.0, 1.0, self.L, dtype=np.float64)
+        ui = u0(self.reconstruct_x_at_nodes())
 
         b = np.zeros((self.D, self.N + 1))
 
         for j in range(self.D):
 
             for i in range(self.N + 1):
-                b[j, i] = np.trapz(
-                    ui[j,:] * self.Phi[i,:],
-                    epsilon
+                b[j, i] = np.sum(
+                    self.quad_weights * ui[j,:] * self.Phi_q[i,:]
                 )
 
-        #self.u = np.zeros_like(b)
-
         self.u = (self.inv_M @ b.T).T
+
+    def reconstruct_x_at_nodes(self) -> npt.NDArray[np.float64]:
+        """
+        Map reference element nodes epsilon in [-1,1]
+        to physical coordinates for all DG elements.
+
+        Returns
+        -------
+        x_reconstructed : ndarray, shape (D, N+1)
+            Physical x-values for each element and reference node
+        """
+
+        x_grid = np.asarray(self.x, dtype=np.float64)
+
+        x_reconstructed = np.zeros((self.D, self.N + 1), dtype=np.float64)
+
+        for j in range(self.D):
+            x_left = x_grid[j]
+            x_right = x_grid[j + 1]
+
+            dx = x_right - x_left
+
+            x_reconstructed[j, :] = x_left + 0.5 * dx * (self.xi_nodes + 1.0)
+
+        return x_reconstructed
          
     def compute_MassMatrix(self) -> None:
         """
@@ -152,15 +181,12 @@ class DG1DSolver:
             Inverse of the reference mass matrix.
         """
 
-        epsilon = np.linspace(-1.0, 1.0, self.L, dtype=np.float64)
-
         M = np.zeros((self.N + 1, self.N + 1), dtype=np.float64)
 
         for i in range(self.N + 1):
             for j in range(self.N + 1):
-                M[i, j] = np.trapz(
-                    self.Phi[i, :] * self.Phi[j, :],
-                    epsilon
+                M[i, j] = np.sum(
+                    self.quad_weights * self.Phi_q[i, :] * self.Phi_q[j, :],
                 )
 
         self.M = M
@@ -169,9 +195,9 @@ class DG1DSolver:
     def error_in_u0(self, u0 : Callable[[npt.NDArray[np.float64]], npt.NDArray[np.float64]]) -> None:
         """Compute the maximum error between the reconstructed solution uh and the exact solution u0."""
         u_exact = u0(self.reconstruct_x())
-        uh = self.u @ self.Phi
+        uh = self.u @ self.Phi_plot
 
-        error = np.max(np.abs(uh - u_exact))
+        error = np.sqrt(np.mean((uh-u_exact)**2))
 
         #print("reconstructed: ", uh)
         #print("exact: ", u_exact)
@@ -180,8 +206,49 @@ class DG1DSolver:
         #print("mass matrix: ", self.M)
         #print("basis functions: ", self.Phi)
 
-        print("Max error =", error)
+        print("L2 error =", error)
+
+        u_exact = u0(self.reconstruct_x_at_nodes())
+        uh = self.u
+        error = np.sqrt(np.mean((uh-u_exact)**2))
+
+        print("L2 error at nodes =", error)
+
+    def gauss_lobatto_nodes(self) -> npt.NDArray[np.float64]:
+        """
+        Compute the Gauss-Lobatto nodes for a given number of basis functions N. 
+        """
+        if self.N == 1:
+            return np.array([-1.0, 1.0], dtype=np.float64)
+
+        P = Legendre.basis(self.N)
+        dP = P.deriv()
+
+        interior = dP.roots()
+        nodes = np.concatenate(([-1.0], np.sort(interior), [1.0]), dtype=np.float64)
+
+        return nodes
+    
+    def gauss_lobatto_weights(self) -> npt.NDArray[np.float64]:
+        """
+        Compute Gauss-Lobatto-Legendre quadrature weights on [-1,1].
+        """
+
+        N = self.N
+        nodes = self.gauss_lobatto_nodes()
+
+        if N == 1:
+            return np.array([1.0, 1.0], dtype=np.float64)
+
+        Pn = Legendre.basis(N)
+
+        weights = np.zeros(N + 1, dtype=np.float64)
+
+        for i, x in enumerate(nodes):
+            weights[i] = 2.0 / (N * (N + 1)) / (Pn(x) ** 2)
+
+        return weights
 
 def gaussian(x : npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
     """A Gaussian function centered at 0 with standard deviation 1."""
-    return x**5#np.exp(-0.5 * x**2)
+    return np.asarray(1 / np.sqrt(2 * np.pi) * np.exp(-0.5 * x**2), dtype=np.float64)
