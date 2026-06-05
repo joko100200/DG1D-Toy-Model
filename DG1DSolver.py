@@ -72,6 +72,12 @@ class DG1DSolver:
         self.calculate_D_Phi()
 
         self.x_nodes = self.reconstruct_x_at_nodes()
+
+        self.a_nodes = a(self.x_nodes)
+        self.aL = a(self.x[:-1])
+        self.aR = a(self.x[1:])
+
+        self.tmpa = 1.0
  
     def lagrange_basis_matrix(self):
         """
@@ -297,56 +303,62 @@ class DG1DSolver:
 
         self.D_Phi = D_Phi
 
-    def rhs(self, u : npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
-        """Returns all the RHS values for each element."""
-        rhs_all = np.zeros_like(u)
+    def rhs(self, u: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
 
-        for e in range(self.D):
-            rhs_all[e] = self.rhs_element(e, u)
-        
-        return rhs_all
+        # =====================================================
+        # Volume term
+        # =====================================================
 
-    def rhs_element(self, e, u : npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
-        
-        u_e    = u[e]
-        x_e    = self.x_nodes[e]
-        a_e    = a(x_e)                                        # a at physical nodes
+        tmp = self.quad_weights * self.a_nodes * u         # (D, N+1)
 
-        # volume term
-        vol = self.D_Phi.T @ (self.quad_weights * a_e * u_e)
+        vol = tmp @ self.D_Phi                        # (D, N+1)
 
-        # flux vector b
-        f_left, f_right = self.numerical_flux(u, e)
-        b      = np.zeros(self.N + 1)
-        b[0]   = -f_left
-        b[-1]  = +f_right
+        # =====================================================
+        # Numerical fluxes
+        # =====================================================
 
-        return (1.0 / self.h[e]) * (self.inv_M @ (vol - b))
-    
-    def numerical_flux(self, u, e):
-        xL = self.x[e]
-        xR = self.x[e + 1]
-        aL = a(xL)
-        aR = a(xR)
+        left_neighbor  = np.roll(u[:, -1],  1)
+        right_neighbor = np.roll(u[:,  0], -1)
 
-        # left face
-        u_minus_L = u[e - 1, -1] if e > 0 else u[-1, -1]  # periodic
-        u_plus_L  = u[e, 0]
-        f_left    = aL * u_minus_L if aL >= 0 else aL * u_plus_L
+        u_plus_L  = u[:, 0]
+        u_minus_R = u[:, -1]
 
-        # right face
-        u_minus_R = u[e, -1]
-        u_plus_R  = u[e + 1, 0] if e < self.D - 1 else u[0, 0]  # periodic
-        f_right   = aR * u_minus_R if aR >= 0 else aR * u_plus_R
+        f_left = np.where(
+            self.aL >= 0,
+            self.aL * left_neighbor,
+            self.aL * u_plus_L
+        )
 
-        return f_left, f_right
+        f_right = np.where(
+            self.aR >= 0,
+            self.aR * u_minus_R,
+            self.aR * right_neighbor
+        )
+
+        # =====================================================
+        # Boundary vector b
+        # =====================================================
+
+        b = np.zeros_like(u)
+
+        b[:, 0]  = -f_left
+        b[:, -1] =  f_right
+
+        # =====================================================
+        # Apply inverse mass matrix
+        # =====================================================
+
+        rhs = (vol - b) @ self.inv_M.T
+
+        rhs /= self.h[:, None]
+
+        return rhs
 
     def compute_dt(self, cfl):
-        x = self.x_nodes
         a_max = 0.0
 
         for e in range(self.D):
-            a_vals = a(x[e])
+            a_vals = self.a_nodes[e, :]
             a_max = max(a_max, np.max(np.abs(a_vals)))
 
         h_min = np.min(self.h)
@@ -363,7 +375,7 @@ class DG1DSolver:
 
         self.u = u0 + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
     
-    def run(self, T, cfl=0.2):
+    def run(self, T, cfl=0.05):
         t = 0.0
         dt = self.compute_dt(cfl)
         print("t=0 L2 error exact solution= ", self.L2_error(0.0))
@@ -374,8 +386,6 @@ class DG1DSolver:
 
             self.step_rk4(dt)
             t += dt
-
-            print("t =", t, ", L2 error =", self.L2_error(t), "                ", end="\r", flush=True)
 
         print("t =", T, ", L2 error =", self.L2_error(t))
         return self.u
@@ -388,7 +398,11 @@ class DG1DSolver:
 
             x_e = self.x_nodes[e]
 
-            u_exact = gaussian(x_e - 5.0 * t)
+            # x_char is needed for the periodic boundary conditions that we have
+            # I know this is hard coded but I will deal with it later
+            x_char = ((x_e - self.tmpa*t - self.x[0]) % (self.x[-1] - self.x[0])) + self.x[0]
+            u_exact = gaussian(x_char)
+
             u_h = self.u[e]
 
             err += np.sum(
@@ -412,10 +426,29 @@ class DG1DSolver:
 
         return np.sqrt(norm_squared)
 
+    def plot_solution(self):
+        """Plot the solution uh on a dense grid."""
+        import matplotlib.pyplot as plt
+
+        x_dense = self.reconstruct_x().reshape(-1)
+        uh_dense = (self.u @ self.Phi_plot).reshape(-1)
+
+        x_char = ((x_dense - self.tmpa - self.x[0]) % (self.x[-1] - self.x[0])) + self.x[0]
+        uexact_dense = gaussian(x_char)
+
+        plt.plot(x_dense, uh_dense, label='DG Solution')
+        plt.plot(x_dense, uexact_dense, label='Exact Solution', linestyle='dashed')
+        plt.xlabel('x')
+        plt.ylabel('u_h(x)')
+        plt.title('DG Solution at Final Time')
+        plt.legend()
+        plt.grid()
+        plt.savefig("DG_solution.png")
+
 def gaussian(x : npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
     """A Gaussian function centered at 0 with standard deviation 1."""
     return np.asarray(np.exp(-0.5 * x**2), dtype=np.float64)
 
 def a (x : npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
     """A variable wave speed function."""
-    return 5.0 * np.ones_like(x, dtype=np.float64)
+    return 1.0 * np.ones_like(x, dtype=np.float64)
