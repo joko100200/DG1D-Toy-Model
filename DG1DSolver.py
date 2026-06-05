@@ -342,7 +342,7 @@ class DG1DSolver:
         return f_left, f_right
 
     def compute_dt(self, cfl):
-        x = self.reconstruct_x_at_nodes()
+        x = self.x_nodes
         a_max = 0.0
 
         for e in range(self.D):
@@ -363,10 +363,10 @@ class DG1DSolver:
 
         self.u = u0 + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
     
-    def run(self, T, cfl=0.5):
+    def run(self, T, cfl=0.2):
         t = 0.0
         dt = self.compute_dt(cfl)
-        print("t=0 L2 error = ", self.L2_error(0.0))
+        print("t=0 L2 error exact solution= ", self.L2_error(0.0))
 
         while t < T:
             if t + dt > T:
@@ -375,8 +375,9 @@ class DG1DSolver:
             self.step_rk4(dt)
             t += dt
 
-            print("t =", t, ", L2 error =", self.L2_error(t))
+            print("t =", t, ", L2 error =", self.L2_error(t), "                ", end="\r", flush=True)
 
+        print("t =", T, ", L2 error =", self.L2_error(t))
         return self.u
 
     def L2_error(self, t):
@@ -385,9 +386,9 @@ class DG1DSolver:
 
         for e in range(self.D):
 
-            x_e = self.reconstruct_x_at_nodes()[e]
+            x_e = self.x_nodes[e]
 
-            u_exact = gaussian(x_e - t)   # <-- THIS is the key advection shift
+            u_exact = gaussian(x_e - 5.0 * t)
             u_h = self.u[e]
 
             err += np.sum(
@@ -395,6 +396,21 @@ class DG1DSolver:
             ) * self.h[e]
 
         return np.sqrt(err)
+    
+    def compute_L2_norm(self, u=None):
+        """Compute the L2 norm of the solution uh."""
+        if u is None:
+            u = self.u
+
+        norm_squared = 0.0
+
+        for e in range(self.D):
+            u_e = u[e]
+            norm_squared += np.sum(
+                self.quad_weights * u_e**2
+            ) * self.h[e]
+
+        return np.sqrt(norm_squared)
 
 def gaussian(x : npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
     """A Gaussian function centered at 0 with standard deviation 1."""
@@ -402,4 +418,4 @@ def gaussian(x : npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
 
 def a (x : npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
     """A variable wave speed function."""
-    return np.ones_like(x, dtype=np.float64)
+    return 5.0 * np.ones_like(x, dtype=np.float64)

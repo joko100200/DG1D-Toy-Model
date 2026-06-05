@@ -13,9 +13,12 @@ solver = DG1DSolver.DG1DSolver(x_grid, N, L)
 solver.initialize_solution(DG1DSolver.gaussian)
 #solver.error_in_u0(DG1DSolver.gaussian)
 
+print("L2 norm at T = 0 ", solver.compute_L2_norm())
+
 T = 1.0
-solver.error_in_u0(DG1DSolver.gaussian)
 solver.run(T)
+
+print("L2 norm after time T =", T, "is", solver.compute_L2_norm())
 
 
 
