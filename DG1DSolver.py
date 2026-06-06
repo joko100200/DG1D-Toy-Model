@@ -92,7 +92,7 @@ class DG1DSolver:
         self,
         init_fn: Callable[
             [npt.NDArray[np.float64]],
-            tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]
+            tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]]
         ]
     ) -> None:
         """
@@ -101,21 +101,23 @@ class DG1DSolver:
         Parameters
         ----------
         init_fn : callable
-            Function of x returning (f, g) where
-                f = p at t=0  (e.g. initial velocity)
-                g = q at t=0  (e.g. initial spatial derivative)
+            Function of x returning (f, fx, g) where
+                f = U(x, 0)
+                fx = ∂U/∂x(x, 0)
+                g = q(x, 0)
 
         Stores
         ------
-        self.u : (D, N+1, 2)
-            u[:, :, 0] = coefficients for p
-            u[:, :, 1] = coefficients for q
+        self.u : (D, N+1, 3)
+            u[:, :, 0] = coefficients for U
+            u[:, :, 1] = coefficients for q = ∂U/∂x
+            u[:, :, 2] = coefficients for p = ∂U/∂t 
         """
-        f_vals, g_vals = init_fn(self.x_nodes)   # each (D, N+1)
+        f_vals, fx_vals, g_vals = init_fn(self.x_nodes)   # each (D, N+1)
 
-        self.u = np.zeros((self.D, self.N + 1, 2), dtype=np.float64)
+        self.u = np.zeros((self.D, self.N + 1, 3), dtype=np.float64)
 
-        for component, vals in enumerate([f_vals, g_vals]):
+        for component, vals in enumerate([f_vals, fx_vals, g_vals]):
             b = np.zeros((self.D, self.N + 1))
             for j in range(self.D):
                 for i in range(self.N + 1):
@@ -133,15 +135,18 @@ class DG1DSolver:
         self.M     = M
         self.inv_M = np.linalg.inv(M)
 
-    def error_in_u0(self, init_fn) -> None:
+    def error_in_u0(self, init_fn : Callable[[npt.NDArray[np.float64]], tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]]]) -> None:
         """Print projection error at t=0 for both components."""
-        f_exact, g_exact = init_fn(self.x_nodes)
-        p_h = self.u[:, :, 0]
+        f_exact, fx_exact, g_exact = init_fn(self.x_nodes)
+        U_h = self.u[:, :, 0]
         q_h = self.u[:, :, 1]
-        err_p = np.sqrt(np.mean((p_h - f_exact)**2))
-        err_q = np.sqrt(np.mean((q_h - g_exact)**2))
-        print(f"Projection error p: {err_p:.6e}")
+        p_h = self.u[:, :, 2]
+        err_p = np.sqrt(np.mean((U_h - f_exact)**2))
+        err_q = np.sqrt(np.mean((q_h - fx_exact)**2))
+        err_g = np.sqrt(np.mean((p_h - g_exact)**2))
+        print(f"Projection error U: {err_p:.6e}")
         print(f"Projection error q: {err_q:.6e}")
+        print(f"Projection error p: {err_g:.6e}")
 
     def gauss_lobatto_nodes(self) -> npt.NDArray[np.float64]:
         if self.N == 1:
@@ -185,25 +190,26 @@ class DG1DSolver:
 
     def rhs(self, u: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
         """
-        RHS for the wave system  d/dt [p, q] = [d/dx q, d/dx p].
+        RHS for the wave system  d/dt [U, q, p] = [p, d/dx p, d/dt q - V(x)U].
 
         Parameters
         ----------
-        u : (D, N+1, 2)
+        u : (D, N+1, 3)
 
         Returns
         -------
-        dudt : (D, N+1, 2)
+        dudt : (D, N+1, 3)
         """
-        p = u[:, :, 0]
+        U = u[:, :, 0]
         q = u[:, :, 1]
+        p = u[:, :, 2]
 
         # volume — positive, same structure as working advection solver
         vol_p = (self.quad_weights * q) @ self.D_Phi
         vol_q = (self.quad_weights * p) @ self.D_Phi
 
         # Potential source term -V(x)*p in q equation
-        source = (self.quad_weights * self.V_at_nodes * p) @ self.inv_M.T
+        source = (self.quad_weights * self.V_at_nodes * U) @ self.inv_M.T
 
         # interface values
         p_minus_L = np.roll(p[:, -1],  1)
@@ -230,8 +236,9 @@ class DG1DSolver:
         b_q[:, 0]  = -hat_p_L;  b_q[:, -1] = hat_p_R
 
         dudt = np.zeros_like(u)
-        dudt[:, :, 0] = ((b_p - vol_p) @ self.inv_M.T) / self.h[:, None] - source
+        dudt[:, :, 0] = p
         dudt[:, :, 1] = ((b_q - vol_q) @ self.inv_M.T) / self.h[:, None]
+        dudt[:, :, 2] = ((b_p - vol_p) @ self.inv_M.T) / self.h[:, None] - source
 
         return dudt
 
@@ -250,13 +257,13 @@ class DG1DSolver:
     def run(self, T: float, cfl: float = 0.5) -> npt.NDArray[np.float64]:
         t  = 0.0
         dt = self.compute_dt(cfl)
-        print(f"t = 0.0, L2 error = {self.L2_error(0.0)}, Energy = {self.compute_energy()}")
+        print(f"t = 0.0, L2 error = {self.L2_error(0.0)}, Energy = {self.compute_energy()}, L2 norm = {self.compute_L2_norm()}")
         while t < T:
             if t + dt > T:
                 dt = T - t
             self.step_rk4(dt)
             t += dt
-        print(f"t = {T}, L2 error = {self.L2_error(T)}, Energy = {self.compute_energy()}")
+        print(f"t = {T}, L2 error = {self.L2_error(T)}, Energy = {self.compute_energy()}, L2 norm = {self.compute_L2_norm()}")
         return self.u
     
     def L2_error(self, t: float) -> float:
@@ -267,54 +274,62 @@ class DG1DSolver:
             x_e     = self.x_nodes[e]
             x_plus  = ((x_e + t - self.x[0]) % domain_len) + self.x[0]
             x_minus = ((x_e - t - self.x[0]) % domain_len) + self.x[0]
-            f_plus,  g_plus = initial_state(x_plus)
-            f_minus, g_minus = initial_state(x_minus)
-            p_exact    = 0.5 * (f_plus + f_minus + g_plus - g_minus)
-            p_h        = self.u[e, :, 0]
+            _, fx_plus, g_plus = initial_state(x_plus)
+            _, fx_minus, g_minus = initial_state(x_minus)
+            p_exact    = 0.5 * (g_plus + g_minus + fx_plus - fx_minus)
+            p_h        = self.u[e, :, 2]
             err += np.sum(self.quad_weights * (p_h - p_exact)**2) * self.h[e]
 
         return np.sqrt(err)
 
     def compute_energy(self) -> float:
         """
-        Discrete energy E = 0.5 * integral (p^2 + q^2) dx.
+        Discrete energy E = 0.5 * integral (p^2 + q^2 + V * U^2) dx.
         Should be conserved by the wave system.
         """
-        p = self.u[:, :, 0]
+        U = self.u[:, :, 0]
         q = self.u[:, :, 1]
+        p = self.u[:, :, 2]
+
         energy = 0.0
         for e in range(self.D):
-            energy += np.sum(self.quad_weights * (p[e]**2 + q[e]**2 + self.V_at_nodes[e] * p[e]**2)) * self.h[e]
+            energy += np.sum(self.quad_weights * (p[e]**2 + q[e]**2 + self.V_at_nodes[e] * U[e]**2)) * self.h[e]
         return 0.5 * energy
 
     def compute_L2_norm(self) -> float:
-        """L2 norm of p."""
-        p = self.u[:, :, 0]
+        """L2 norm of U."""
+        U = self.u[:, :, 0]
         norm_sq = 0.0
         for e in range(self.D):
-            norm_sq += np.sum(self.quad_weights * p[e]**2) * self.h[e]
+            norm_sq += np.sum(self.quad_weights * U[e]**2) * self.h[e]
         return np.sqrt(norm_sq)
 
     def plot_solution(self, t: float, filename: str = "graphs/DG_wave_solution.png") -> None:
         import matplotlib.pyplot as plt
 
         x_dense = self.reconstruct_x().reshape(-1)
-        p_dense = (self.u[:, :, 0] @ self.Phi_plot).reshape(-1)
+        U_dense = (self.u[:, :, 0] @ self.Phi_plot).reshape(-1)
         q_dense = (self.u[:, :, 1] @ self.Phi_plot).reshape(-1)
+        p_dense = (self.u[:, :, 2] @ self.Phi_plot).reshape(-1)
 
         domain_len = self.x[-1] - self.x[0]
         x_plus  = ((x_dense + t - self.x[0]) % domain_len) + self.x[0]
         x_minus = ((x_dense - t - self.x[0]) % domain_len) + self.x[0]
-        f_plus,  g_plus = initial_state(x_plus)
-        f_minus, g_minus = initial_state(x_minus)
-        p_exact = 0.5 * (f_plus + f_minus + g_plus - g_minus)
+        _, fx_plus, g_plus = initial_state(x_plus)
+        _, fx_minus, g_minus = initial_state(x_minus)
 
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6))
+        p_exact = 0.5 * (g_plus + g_minus + fx_plus - fx_minus)
+        q_exact = 0.5 * (g_plus - g_minus + fx_plus + fx_minus)
+
+        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
         ax1.plot(x_dense, p_dense, label='DG p')
         ax1.plot(x_dense, p_exact, label='Exact p', linestyle='dashed')
         ax1.set_ylabel('p');  ax1.legend();  ax1.grid()
         ax2.plot(x_dense, q_dense, label='DG q')
+        ax2.plot(x_dense, q_exact, label='Exact q', linestyle='dashed')
         ax2.set_ylabel('q');  ax2.legend();  ax2.grid()
+        ax3.plot(x_dense, U_dense, label='DG U')
+        ax3.set_xlabel('x');  ax3.set_ylabel('U');  ax3.legend();  ax3.grid()
         plt.suptitle(f'Wave equation DG solution at t={t:.3f}')
         plt.tight_layout()
         plt.savefig(filename, dpi=300)
@@ -325,20 +340,20 @@ class DG1DSolver:
 # Initial conditions
 # ------------------------------------------------------------------
 
-def initial_state(x: npt.NDArray[np.float64]) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+def initial_state(x: npt.NDArray[np.float64]) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]]:
     """
     Gaussian initial state.
 
     Returns
     -------
-    f : U at t=0  — initial value of the wave function
+    f : U(x, 0)
     fx : partial_x U(x, 0)
     g : partial_t U(x, 0)
     """
-    f = (np.exp(-0.5 * x**2)).astype(np.float64) # initial value U(x, 0)
-    # fx = (-x * np.exp(-0.5 * x**2)).astype(np.float64) # partial_x U(x, 0)
-    g = (np.exp(-0.5 * x**2) * -x).astype(np.float64) # partial_t U(x, 0)
-    return f, g
+    f = (np.sin(6*x) * np.exp(-0.5 * x**2)).astype(np.float64) # initial value U(x, 0)
+    fx = (-np.exp(-0.5 * x**2)*(x*np.sin(6*x) - 6*np.cos(6*x))).astype(np.float64) # partial_x U(x, 0)
+    g = (np.exp(-0.5 * x**2)*(x*np.sin(6*x) - 6*np.cos(6*x))).astype(np.float64) # partial_t U(x, 0)
+    return f, fx, g
 
 def effective_potential(x: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
     """

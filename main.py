@@ -5,15 +5,15 @@ import matplotlib.pyplot as plt
 # -------------------------
 # PARAMETERS
 # -------------------------
-N = 5
+N = 6
 L = 100
 left_bound = -10.0
-right_bound = 10.0
+right_bound = 20.0
 
 T = 5.0        # keep T small relative to domain so periodic wrapping
 cfl = 0.1      # doesn't corrupt the exact solution at fine grids
 
-D_values = [20, 40, 80, 160, 320]
+D_values = [20, 40, 80, 160, 320, 640]
 
 errors = []
 hs = []
@@ -41,7 +41,7 @@ for D in D_values:
     errors.append(err)
     hs.append(h)
 
-    print(f"h = {h:.6e}, L2 error = {err:.6e}")
+    print(f"h = {h:.6e}")
 
 # -------------------------
 # COMPUTE CONVERGENCE ORDER
