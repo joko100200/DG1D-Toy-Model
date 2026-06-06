@@ -5,13 +5,13 @@ import matplotlib.pyplot as plt
 # -------------------------
 # PARAMETERS
 # -------------------------
-N = 5                 # polynomial degree (fixed)
-L = 100                # quadrature resolution
+N = 5
+L = 100
 left_bound = -10.0
 right_bound = 10.0
 
-T = 1.0
-cfl = 0.2
+T = 1.0        # keep T small relative to domain so periodic wrapping
+cfl = 0.1      # doesn't corrupt the exact solution at fine grids
 
 D_values = [20, 40, 80, 160, 320]
 
@@ -31,16 +31,12 @@ for D in D_values:
 
     solver = DG1DSolver.DG1DSolver(x_grid, N, L)
 
-    # initial condition
-    solver.initialize_solution(DG1DSolver.gaussian)
+    solver.initialize_solution(DG1DSolver.initial_state)
 
-    # time integration
     solver.run(T, cfl)
 
-    # L2 error at final time (IMPORTANT: periodic exact solution assumed inside)
     err = solver.L2_error(T)
-
-    h = (right_bound - left_bound) / D
+    h   = (right_bound - left_bound) / D
 
     errors.append(err)
     hs.append(h)
@@ -50,9 +46,8 @@ for D in D_values:
 # -------------------------
 # COMPUTE CONVERGENCE ORDER
 # -------------------------
-hs = np.array(hs)
+hs     = np.array(hs)
 errors = np.array(errors)
-
 orders = np.log(errors[:-1] / errors[1:]) / np.log(2)
 
 print("\n==============================")
@@ -70,7 +65,7 @@ plt.loglog(hs, errors, marker='o')
 plt.gca().invert_xaxis()
 plt.xlabel("h")
 plt.ylabel("L2 error")
-plt.title(f"DG Convergence Study (N={N})")
+plt.title(f"DG Wave Equation Convergence (N={N})")
 plt.grid(True, which="both")
-plt.savefig(f"convergence_plot(N={N})(cfl={cfl}).png", dpi=300)
+plt.savefig(f"graphs/wave_convergence_plot(N={N})(cfl={cfl}).png", dpi=300)
 plt.show()
