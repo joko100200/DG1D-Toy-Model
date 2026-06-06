@@ -33,6 +33,9 @@ class DG1DSolver:
 
         self.x_nodes = self.reconstruct_x_at_nodes()
 
+        # Since we are not using a time dependent potential we pre compute for efficiency
+        self.V_at_nodes = effective_potential(self.x_nodes)
+
     def lagrange_basis_matrix(self):
         """
         Lagrange basis functions on the reference element [-1, 1].
@@ -199,6 +202,9 @@ class DG1DSolver:
         vol_p = (self.quad_weights * q) @ self.D_Phi
         vol_q = (self.quad_weights * p) @ self.D_Phi
 
+        # Potential source term -V(x)*p in q equation
+        source = (self.quad_weights * self.V_at_nodes * p) @ self.inv_M.T
+
         # interface values
         p_minus_L = np.roll(p[:, -1],  1)
         p_plus_L  = p[:, 0]
@@ -224,7 +230,7 @@ class DG1DSolver:
         b_q[:, 0]  = -hat_p_L;  b_q[:, -1] = hat_p_R
 
         dudt = np.zeros_like(u)
-        dudt[:, :, 0] = ((b_p - vol_p) @ self.inv_M.T) / self.h[:, None]
+        dudt[:, :, 0] = ((b_p - vol_p) @ self.inv_M.T) / self.h[:, None] - source
         dudt[:, :, 1] = ((b_q - vol_q) @ self.inv_M.T) / self.h[:, None]
 
         return dudt
@@ -244,13 +250,13 @@ class DG1DSolver:
     def run(self, T: float, cfl: float = 0.5) -> npt.NDArray[np.float64]:
         t  = 0.0
         dt = self.compute_dt(cfl)
-        print("t=0 L2 error = ", self.L2_error(0.0), "Energy =", self.compute_energy())
+        print(f"t = 0.0, L2 error = {self.L2_error(0.0)}, Energy = {self.compute_energy()}")
         while t < T:
             if t + dt > T:
                 dt = T - t
             self.step_rk4(dt)
             t += dt
-        print(f"t = {T}, L2 error = {self.L2_error(T):.6e}, Energy = {self.compute_energy():.6e}")
+        print(f"t = {T}, L2 error = {self.L2_error(T)}, Energy = {self.compute_energy()}")
         return self.u
     
     def L2_error(self, t: float) -> float:
@@ -261,9 +267,9 @@ class DG1DSolver:
             x_e     = self.x_nodes[e]
             x_plus  = ((x_e + t - self.x[0]) % domain_len) + self.x[0]
             x_minus = ((x_e - t - self.x[0]) % domain_len) + self.x[0]
-            f_plus,  _ = initial_state(x_plus)
-            f_minus, _ = initial_state(x_minus)
-            p_exact    = 0.5 * (f_plus + f_minus)
+            f_plus,  g_plus = initial_state(x_plus)
+            f_minus, g_minus = initial_state(x_minus)
+            p_exact    = 0.5 * (f_plus + f_minus + g_plus - g_minus)
             p_h        = self.u[e, :, 0]
             err += np.sum(self.quad_weights * (p_h - p_exact)**2) * self.h[e]
 
@@ -278,7 +284,7 @@ class DG1DSolver:
         q = self.u[:, :, 1]
         energy = 0.0
         for e in range(self.D):
-            energy += np.sum(self.quad_weights * (p[e]**2 + q[e]**2)) * self.h[e]
+            energy += np.sum(self.quad_weights * (p[e]**2 + q[e]**2 + self.V_at_nodes[e] * p[e]**2)) * self.h[e]
         return 0.5 * energy
 
     def compute_L2_norm(self) -> float:
@@ -289,7 +295,7 @@ class DG1DSolver:
             norm_sq += np.sum(self.quad_weights * p[e]**2) * self.h[e]
         return np.sqrt(norm_sq)
 
-    def plot_solution(self, t: float) -> None:
+    def plot_solution(self, t: float, filename: str = "graphs/DG_wave_solution.png") -> None:
         import matplotlib.pyplot as plt
 
         x_dense = self.reconstruct_x().reshape(-1)
@@ -299,9 +305,9 @@ class DG1DSolver:
         domain_len = self.x[-1] - self.x[0]
         x_plus  = ((x_dense + t - self.x[0]) % domain_len) + self.x[0]
         x_minus = ((x_dense - t - self.x[0]) % domain_len) + self.x[0]
-        f_plus,  _ = initial_state(x_plus)
-        f_minus, _ = initial_state(x_minus)
-        p_exact = 0.5 * (f_plus + f_minus)
+        f_plus,  g_plus = initial_state(x_plus)
+        f_minus, g_minus = initial_state(x_minus)
+        p_exact = 0.5 * (f_plus + f_minus + g_plus - g_minus)
 
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6))
         ax1.plot(x_dense, p_dense, label='DG p')
@@ -311,7 +317,7 @@ class DG1DSolver:
         ax2.set_ylabel('q');  ax2.legend();  ax2.grid()
         plt.suptitle(f'Wave equation DG solution at t={t:.3f}')
         plt.tight_layout()
-        plt.savefig("graphs/DG_wave_solution.png", dpi=300)
+        plt.savefig(filename, dpi=300)
         plt.show()
 
 
@@ -319,17 +325,32 @@ class DG1DSolver:
 # Initial conditions
 # ------------------------------------------------------------------
 
-def initial_state(
-    x: npt.NDArray[np.float64]
-) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+def initial_state(x: npt.NDArray[np.float64]) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
     """
     Gaussian initial state.
 
     Returns
     -------
-    f : p at t=0  — Gaussian pulse
-    g : q at t=0  — spatial derivative of Gaussian
+    f : U at t=0  — initial value of the wave function
+    fx : partial_x U(x, 0)
+    g : partial_t U(x, 0)
     """
-    f = np.exp(-0.5 * x**2).astype(np.float64)
-    g = np.zeros_like(x, dtype=np.float64)
+    f = (np.exp(-0.5 * x**2)).astype(np.float64) # initial value U(x, 0)
+    # fx = (-x * np.exp(-0.5 * x**2)).astype(np.float64) # partial_x U(x, 0)
+    g = (np.exp(-0.5 * x**2) * -x).astype(np.float64) # partial_t U(x, 0)
     return f, g
+
+def effective_potential(x: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+    """
+    Effective potential V(x) for the wave equation.
+    Appears as a source term -V(x)*p in the q equation.
+    
+    Parameters
+    ----------
+    x : (D, N+1) array of physical node positions
+    
+    Returns
+    -------
+    V : (D, N+1) array of potential values at each node
+    """
+    return np.zeros_like(x)

@@ -10,7 +10,7 @@ L = 100
 left_bound = -10.0
 right_bound = 10.0
 
-T = 1.0        # keep T small relative to domain so periodic wrapping
+T = 5.0        # keep T small relative to domain so periodic wrapping
 cfl = 0.1      # doesn't corrupt the exact solution at fine grids
 
 D_values = [20, 40, 80, 160, 320]
@@ -67,5 +67,10 @@ plt.xlabel("h")
 plt.ylabel("L2 error")
 plt.title(f"DG Wave Equation Convergence (N={N})")
 plt.grid(True, which="both")
-plt.savefig(f"graphs/wave_convergence_plot(N={N})(cfl={cfl}).png", dpi=300)
+plt.savefig(f"graphs/waveconvergence_plot_V(N={N})(cfl={cfl}).png", dpi=300)
 plt.show()
+
+#---------------------------
+# Final Graph Plotting
+#---------------------------
+solver.plot_solution(T, f"graphs/waveconvergence_solution_V(N={N})(cfl={cfl}).png")
