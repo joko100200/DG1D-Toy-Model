@@ -1,6 +1,26 @@
+import os
+import sys
+from datetime import datetime
+import inspect
 import numpy as np
 import DG1DSolver
 import matplotlib.pyplot as plt
+
+class Tee:
+    def __init__(self, filepath, mode="w"):
+        self.file = open(filepath, mode)
+        self.stdout = sys.stdout
+
+    def write(self, data):
+        self.stdout.write(data)
+        self.file.write(data)
+
+    def flush(self):
+        self.stdout.flush()
+        self.file.flush()
+
+    def close(self):
+        self.file.close()
 
 # -------------------------
 # PARAMETERS
@@ -17,6 +37,38 @@ D_values = [20, 40, 80, 160, 320, 640]
 
 errors = []
 hs = []
+
+run_tag = f"N{N}_T{T}_cfl{cfl}_Dmax{max(D_values)}"
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+complete_filename = f"convergence_{run_tag}_{timestamp}"
+log_file = f"logs/{complete_filename}.txt"
+
+os.makedirs("logs", exist_ok=True)
+os.makedirs("graphs", exist_ok=True)
+sys.stdout = Tee(log_file)
+
+print("================================")
+print("DG CONVERGENCE RUN")
+print("================================")
+print(f"N = {N}")
+print(f"D values = {D_values}")
+print(f"T = {T}")
+print(f"CFL = {cfl}")
+print(f"Domain = [{left_bound}, {right_bound}]")
+
+src = inspect.getsource(DG1DSolver.initial_state)
+
+keep_keywords = ["f =", "fx =", "g ="]
+
+filtered_lines = [
+    line for line in src.splitlines()
+    if any(k in line for k in keep_keywords)
+]
+
+print("\n".join(filtered_lines))
+
+print("================================\n")
 
 # -------------------------
 # CONVERGENCE LOOP
@@ -40,8 +92,6 @@ for D in D_values:
 
     errors.append(err)
     hs.append(h)
-
-    print(f"h = {h:.6e}")
 
 # -------------------------
 # COMPUTE CONVERGENCE ORDER
@@ -67,10 +117,63 @@ plt.xlabel("h")
 plt.ylabel("L2 error")
 plt.title(f"DG Wave Equation Convergence (N={N})")
 plt.grid(True, which="both")
-plt.savefig(f"graphs/waveconvergence_plot_V(N={N})(cfl={cfl}).png", dpi=300)
+plt.savefig(f"graphs/{complete_filename}_Log_Log.png", dpi=300)
 plt.show()
 
 #---------------------------
 # Final Graph Plotting
 #---------------------------
-solver.plot_solution(T, f"graphs/waveconvergence_solution_V(N={N})(cfl={cfl}).png")
+solver.plot_solution(T, f"graphs/{complete_filename}_solution.png")
+
+# -------------------------
+# P-REFINEMENT STUDY
+# (hold D fixed, vary N)
+# -------------------------
+
+print("\n==============================")
+print("P-refinement study (fixed D)")
+print("==============================")
+
+D_fixed = 160  # choose reasonably fine mesh
+x_grid = np.linspace(left_bound, right_bound, D_fixed + 1)
+
+N_values = [2, 3, 4, 5, 6]
+
+p_errors = []
+
+for Np in N_values:
+
+    print("\n------------------------------")
+    print(f"Running D = {D_fixed}, N = {Np}")
+    print("------------------------------")
+
+    solver = DG1DSolver.DG1DSolver(x_grid, Np, L)
+    solver.initialize_solution(DG1DSolver.initial_state)
+    solver.run(T, cfl)
+
+    err = solver.L2_error(T)
+    p_errors.append(err)
+
+print("\n==============================")
+print("P-refinement exponential rates")
+print("==============================")
+
+alpha_values = []
+
+for i in range(len(N_values) - 1):
+    alpha = np.log(p_errors[i] / p_errors[i+1]) / (N_values[i+1] - N_values[i])
+    alpha_values.append(alpha)
+    print(f"N={N_values[i]} -> {N_values[i+1]} : alpha ≈ {alpha:.6f}")
+
+# -------------------------
+# PLOT P-CONVERGENCE
+# -------------------------
+
+plt.figure()
+plt.semilogy(N_values, p_errors, marker='o')
+plt.xlabel("Polynomial degree N")
+plt.ylabel("L2 error")
+plt.title(f"DG p-convergence (fixed D={D_fixed})")
+plt.grid(True, which="both")
+plt.savefig(f"graphs/{complete_filename}_p_convergence.png", dpi=300)
+plt.show()

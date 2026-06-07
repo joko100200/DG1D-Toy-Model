@@ -208,8 +208,11 @@ class DG1DSolver:
         vol_p = (self.quad_weights * q) @ self.D_Phi
         vol_q = (self.quad_weights * p) @ self.D_Phi
 
-        # Potential source term -V(x)*p in q equation
-        source = (self.quad_weights * self.V_at_nodes * U) @ self.inv_M.T
+        # Potential source term -V(x)*U in p equation
+        # Make sure that this source term is correct before we make V not equal to zero
+        # Since we slightly changed this so that in the dot q calculation we could bring source in
+        # This might not be correct make sure that it is before we run it.
+        source = (self.quad_weights * self.V_at_nodes * U * self.h[:, None]) #@ self.inv_M.T
 
         # interface values
         p_minus_L = np.roll(p[:, -1],  1)
@@ -238,7 +241,7 @@ class DG1DSolver:
         dudt = np.zeros_like(u)
         dudt[:, :, 0] = p
         dudt[:, :, 1] = ((b_q - vol_q) @ self.inv_M.T) / self.h[:, None]
-        dudt[:, :, 2] = ((b_p - vol_p) @ self.inv_M.T) / self.h[:, None] - source
+        dudt[:, :, 2] = ((b_p - vol_p - source) @ self.inv_M.T) / self.h[:, None] #- source
 
         return dudt
 
@@ -271,14 +274,17 @@ class DG1DSolver:
         domain_len = self.x[-1] - self.x[0]
 
         for e in range(self.D):
-            x_e     = self.x_nodes[e]
-            x_plus  = ((x_e + t - self.x[0]) % domain_len) + self.x[0]
+            x_e = self.x_nodes[e]
+            x_plus = ((x_e + t - self.x[0]) % domain_len) + self.x[0]
             x_minus = ((x_e - t - self.x[0]) % domain_len) + self.x[0]
             _, fx_plus, g_plus = initial_state(x_plus)
             _, fx_minus, g_minus = initial_state(x_minus)
-            p_exact    = 0.5 * (g_plus + g_minus + fx_plus - fx_minus)
-            p_h        = self.u[e, :, 2]
+            p_exact = 0.5 * (g_plus + g_minus + fx_plus - fx_minus)
+            q_exact = 0.5 * (g_plus - g_minus + fx_plus + fx_minus)
+            p_h = self.u[e, :, 2]
+            q_h = self.u[e, :, 1]
             err += np.sum(self.quad_weights * (p_h - p_exact)**2) * self.h[e]
+            err += np.sum(self.quad_weights * (q_h - q_exact)**2) * self.h[e]
 
         return np.sqrt(err)
 
@@ -303,7 +309,7 @@ class DG1DSolver:
         for e in range(self.D):
             norm_sq += np.sum(self.quad_weights * U[e]**2) * self.h[e]
         return np.sqrt(norm_sq)
-
+    
     def plot_solution(self, t: float, filename: str = "graphs/DG_wave_solution.png") -> None:
         import matplotlib.pyplot as plt
 
@@ -342,7 +348,7 @@ class DG1DSolver:
 
 def initial_state(x: npt.NDArray[np.float64]) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]]:
     """
-    Gaussian initial state.
+    Initial state.
 
     Returns
     -------
