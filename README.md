@@ -41,7 +41,11 @@ $$\partial_{tt} U = \partial_{xx} U - V(x)U$$
 
 rewritten as a first-order system with $q = \partial_x U$ and $p = \partial_t U$:
 
-$$\partial_t \begin{pmatrix} U \\ q \\ p \end{pmatrix} = \begin{pmatrix} p \\ \partial_x p \\ \partial_x q - V(x)U \end{pmatrix}$$
+$$\partial_t U = p$$
+
+$$\partial_t q = \partial_x p$$
+
+$$\partial_t p = \partial_x q - V(x)U$$
 
 The domain $[x_L, x_R]$ is partitioned into $D$ elements $I_e = [x_e, x_{e+1}]$
 with half-width $h_e = (x_{e+1} - x_e)/2$.
