@@ -35,7 +35,7 @@ Achieves order $N+1$ convergence in $h$-refinement and exponential convergence i
 
 ### 1. Problem and State Vector
 
-We solve the second-order wave equation
+Solveing the second-order wave equation
 
 $$\partial_{tt} U = \partial_{xx} U - V(x)U$$
 
