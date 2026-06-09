@@ -25,13 +25,18 @@ class DG1DSolver:
     The projection of any function onto the basis is just its nodal values.
     """
 
-    def __init__(self, x_grid: npt.NDArray[np.float64], N: int, L: int):
+    def __init__(self, x_grid: npt.NDArray[np.float64], N: int, L: int, R: float, P: int, outputfileDir: str):
         self.D = len(x_grid) - 1
         self.N = N
         self.L = L
 
         self.x = x_grid
         self.h = (self.x[1:] - self.x[:-1]) / 2.0          # shape (D,)
+
+        self.R = R
+        self.P = P
+
+        self.s = self.x[-1]   # right boundary of physical domain
 
         self.xi_nodes    = self.gauss_lobatto_nodes()
         self.quad_weights = self.gauss_lobatto_weights()     # shape (N+1,)
@@ -40,8 +45,21 @@ class DG1DSolver:
         self.lagrange_basis_matrix()   # builds Phi_plot only — Phi_q = I
         self.calculate_D_Phi()
 
+        self.init_probe_logger(outputfileDir) #File to save waveform output
+
         self.x_nodes     = self.reconstruct_x_at_nodes()    # shape (D, N+1)
         self.V_at_nodes  = effective_potential(self.x_nodes) # shape (D, N+1)
+
+        self.H_at_nodes  = self.compute_H()                # shape (D, N+1)
+
+        denom          = 1.0 - self.H_at_nodes**2
+        safe           = denom > 1e-14
+        limit_at_scri  = 0.0   # compute V(r)*r² / (dΩ²/dρ evaluated at s) analytically
+
+        self.JV_at_nodes = np.where(safe, self.V_at_nodes / np.where(safe, denom, 1.0), limit_at_scri) #(D, N+1)
+        self.coeff_at_nodes = 1.0 / (1.0 + self.H_at_nodes)    # (D, N+1)
+
+        self.u_fine = np.zeros_like(self.x_nodes)
 
     # ------------------------------------------------------------------
     # Basis and quadrature
@@ -110,6 +128,24 @@ class DG1DSolver:
         for i in range(Np):
             D_Phi[i, i] = -np.sum(D_Phi[i])
         self.D_Phi = D_Phi
+    
+    def compute_H(self) -> npt.NDArray[np.float64]:
+        """
+        Compute H(rho) from the hyperboloidal layer definition (Scott et al. Eq. 19, 21).
+        H = 0 for rho ≤ R (outside the layer).
+        """
+        rho   = self.x_nodes          # (D, N+1), your computational coordinate
+        layer = rho > self.R          # mask for interior of layer
+
+        H     = np.zeros_like(rho)
+
+        sigma      = (rho[layer] - self.R) / (self.s - self.R)
+        Omega      = 1.0 - sigma**self.P
+        Omega_prime = -self.P * sigma**(self.P - 1) / (self.s - self.R)
+
+        H[layer] = 1.0 - Omega**2 / (Omega - rho[layer] * Omega_prime)
+
+        return H
 
     # ------------------------------------------------------------------
     # Grid reconstruction
@@ -179,9 +215,9 @@ class DG1DSolver:
     def rhs(self, u: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
         """
         RHS for the system:
-            dU/dt = p
-            dq/dt = d/dx p          (q = dU/dx)
-            dp/dt = d/dx q - V(x)*U
+            dU/dt = -p
+            dq/dt = -d/dx p          (q = dU/dx)
+            dp/dt = -d/dx q - V(x)*U
 
         Since M = diag(w) and inv_M = diag(1/w):
             inv_M @ (vol - b) becomes (vol - b) * inv_w  elementwise.
@@ -203,7 +239,7 @@ class DG1DSolver:
         vol_p = (self.quad_weights * q) @ self.D_Phi   # driven by q
         vol_q = (self.quad_weights * p) @ self.D_Phi   # driven by p
 
-        # ---- interface values (periodic) -------------------------
+        # ---- interface values -------------------------
         p_minus_L = np.roll(p[:, -1],  1)
         p_plus_L  = p[:, 0]
         p_minus_R = p[:, -1]
@@ -213,6 +249,14 @@ class DG1DSolver:
         q_plus_L  = q[:, 0]
         q_minus_R = q[:, -1]
         q_plus_R  = np.roll(q[:, 0], -1)
+
+        # global right boundary (ρ = s): outflow, no incoming state
+        p_plus_R[-1] = p_minus_R[-1]
+        q_plus_R[-1] = q_minus_R[-1]
+
+        # global left boundary: reflecting (zero flux into domain)
+        p_minus_L[0] = -p_plus_L[0]
+        q_minus_L[0] = -q_plus_L[0]
 
         # ---- upwind fluxes ---------------------------------------
         hat_q_L = 0.5*(q_minus_L + q_plus_L) + 0.5*(p_minus_L - p_plus_L)
@@ -229,7 +273,11 @@ class DG1DSolver:
         b_q[:, 0]  = -hat_p_L;  b_q[:, -1] = hat_p_R
 
         # ---- source term -V(x)*U in dp/dt -----------------------
-        source = self.V_at_nodes * U   # (D, N+1), no mass matrix needed
+        potentialVU = self.JV_at_nodes * U   # (D, N+1), no mass matrix needed
+
+        # ---- hyperboloidal terms ---------------------------------
+        H = self.H_at_nodes
+        coeff = self.coeff_at_nodes
 
         # ---- assemble --------------------------------------------
         # inv_M @ v = v * inv_w  (M is diagonal)
@@ -238,9 +286,9 @@ class DG1DSolver:
         dq = ((b_q - vol_q) * self.inv_w) / self.h[:, None]
 
         dudt = np.zeros_like(u)
-        dudt[:, :, 0] = -p                  # dU/dt = p
-        dudt[:, :, 1] = -dq                 # dq/dt
-        dudt[:, :, 2] = -dp - source        # dp/dt = d/dx q - V*U
+        dudt[:, :, 0] = -p
+        dudt[:, :, 1] = coeff * (-dq - H * dp) - H * potentialVU
+        dudt[:, :, 2] = coeff * (-dp - H * dq) - potentialVU
 
         return dudt
 
@@ -263,68 +311,103 @@ class DG1DSolver:
     def run(self, T: float, cfl: float = 0.5) -> npt.NDArray[np.float64]:
         t  = 0.0
         dt = self.compute_dt(cfl)
-        print(f"t = 0.0 | L2 = {self.L2_error(0.0):.6e} | E = {self.compute_energy():.6e}")
+        print(f"t = 0.0 | L2 = {self.L2_error_self(self.u_fine):.6e} | E = {self.compute_energy():.6e}")
         while t < T:
             if t + dt > T:
                 dt = T - t
             self.step_rk4(dt)
             t += dt
-        print(f"t = {T} | L2 = {self.L2_error(T):.6e} | E = {self.compute_energy():.6e}")
+        print(f"t = {T} | L2 = {self.L2_error_self(self.u_fine):.6e} | E = {self.compute_energy():.6e}")
+        return self.u
+
+    def runDEBUG(self, T: float, cfl: float = 0.5) -> npt.NDArray[np.float64]:
+        t   = 0.0
+        dt  = self.compute_dt(cfl)
+
+        print(f"t = {t:.3f} | L2Norm = {self.compute_L2_norm()} | E = {self.compute_energy():.6e}")
+        while t < T:
+            if t + dt > T:
+                dt = T - t
+            self.step_rk4(dt)
+            #print(t, self.compute_L2_norm(), self.compute_energy(), self.energy_in_region(self.x[0], self.R), self.energy_in_region(self.R, self.x[-1]))
+            t += dt
+            self.log_probe(t)
+        
+        self.flush_probe()
+        
+        print(f"t = {t:.3f} | L2Norm = {self.compute_L2_norm()} | E = {self.compute_energy():.6e}")
         return self.u
 
     # ------------------------------------------------------------------
     # Diagnostics
     # ------------------------------------------------------------------
 
-    def L2_error(self, t: float) -> float:
+    def L2_error_self(self, u_fine: npt.NDArray[np.float64]) -> float:
         """
-        L2 error for p and q using the d'Alembert exact solution.
-        Only valid for V=0.
+        Self-convergence L2 error: compare self.u against a fine-grid solution
+        u_fine interpolated to the coarse nodes. Only valid when fine grid is
+        exactly 2x or 4x the coarse resolution so nodes are nested.
         """
-        err        = 0.0
-        domain_len = self.x[-1] - self.x[0]
+        if not np.any(u_fine): return -1.0
 
+        diff = self.u - u_fine   # assumes same node layout, caller handles interpolation
+        err  = 0.0
         for e in range(self.D):
-            x_e     = self.x_nodes[e]
-            x_plus  = ((x_e + t - self.x[0]) % domain_len) + self.x[0]
-            x_minus = ((x_e - t - self.x[0]) % domain_len) + self.x[0]
-
-            _, fx_plus,  g_plus  = initial_state(x_plus)
-            _, fx_minus, g_minus = initial_state(x_minus)
-
-            p_exact =  0.5 * (g_plus  + g_minus - fx_plus  + fx_minus)
-            q_exact =  0.5 * (g_plus  + g_minus - fx_plus  + fx_minus)
-
-            p_h = self.u[e, :, 2]
-            q_h = self.u[e, :, 1]
-
-            err += np.sum(self.quad_weights * ((p_h - p_exact)**2 +
-                                               (q_h - q_exact)**2)) * self.h[e]
-
+            err += np.sum(
+                self.quad_weights * (diff[e, :, 0]**2 +
+                                     diff[e, :, 1]**2 +
+                                     diff[e, :, 2]**2)
+            ) * self.h[e]
         return np.sqrt(err)
+
+    def waveform_at_scri(self) -> tuple[float, float, float]:
+        """
+        Extract U, q, p at the last node of the last element (ρ = s).
+        This is your primary observable — the far-field waveform.
+        Returns (U, q, p) at scri+.
+        """
+        return (self.u[-1, -1, 0],
+                self.u[-1, -1, 1],
+                self.u[-1, -1, 2])
 
     def compute_energy(self) -> float:
         """
         E = 0.5 * integral (p^2 + q^2 + V*U^2) dx
         Conserved by the wave system.
         """
+        U   = self.u[:, :, 0]
+        q   = self.u[:, :, 1]
+        p   = self.u[:, :, 2]
+
+        integrand = (p**2 + q**2 + self.V_at_nodes * U**2)
+        return float(0.5 * np.sum(self.quad_weights * integrand * self.h[:, None]))
+
+    def energy_in_region(self, x_min: float, x_max: float) -> float:
         U = self.u[:, :, 0]
         q = self.u[:, :, 1]
         p = self.u[:, :, 2]
-        energy = 0.0
-        for e in range(self.D):
-            energy += np.sum(
-                self.quad_weights * (p[e]**2 + q[e]**2 + self.V_at_nodes[e] * U[e]**2)
-            ) * self.h[e]
-        return 0.5 * energy
+
+        # element-wise mask (D, N+1)
+        x = self.x_nodes
+        mask = (x >= x_min) & (x <= x_max)
+
+        integrand = (p**2 + q**2 + self.V_at_nodes * U**2)
+
+        # apply mask
+        integrand = integrand * mask
+
+        # quadrature over reference element
+        local_energy = np.sum(self.quad_weights * integrand, axis=1)  # (D,)
+
+        # physical scaling
+        local_energy *= self.h
+
+        return 0.5 * np.sum(local_energy)
 
     def compute_L2_norm(self) -> float:
-        """L2 norm of U."""
-        U = self.u[:, :, 0]
-        norm_sq = 0.0
-        for e in range(self.D):
-            norm_sq += np.sum(self.quad_weights * U[e]**2) * self.h[e]
-        return np.sqrt(norm_sq)
+        """L2 norm of U with hyperboloidal volume element."""
+        U      = self.u[:, :, 0]
+        return np.sqrt(np.sum(self.quad_weights * U**2 * self.h[:, None]))
 
     def error_in_u0(self, init_fn) -> None:
         """Print projection error at t=0."""
@@ -365,6 +448,17 @@ class DG1DSolver:
         plt.tight_layout()
         plt.savefig(filename, dpi=300)
         plt.show()
+
+    def init_probe_logger(self, filename: str = "probe.csv"):
+        self.probe_file = filename
+        self._probe_buffer = []
+    
+    def log_probe(self, t: float):
+        self._probe_buffer.append((t, self.u[-1, -1, 0]))
+    
+    def flush_probe(self):
+        data = np.array(self._probe_buffer)
+        np.savetxt(self.probe_file, data, delimiter=" ", header="t, u_edge", comments="")
 
 
 # ------------------------------------------------------------------

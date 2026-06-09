@@ -25,13 +25,36 @@ class Tee:
 # -------------------------
 # PARAMETERS
 # -------------------------
-N = 6
+N = 4
 L = 100
-left_bound = -10.0
-right_bound = 20.0
+left_bound = -7.0
+right_bound = 30.0
+R = 15.0
+P = 4
 
-T = 5.0        # keep T small relative to domain so periodic wrapping
-cfl = 0.1      # doesn't corrupt the exact solution at fine grids
+T = 50.0
+cfl = 0.4      # doesn't corrupt the exact solution at fine grids
+D = 160
+
+x_grid = np.linspace(left_bound, right_bound, D + 1)
+solver = DG1DSolver.DG1DSolver(x_grid, N, L, R, P, "probe_file.csv")
+solver.initialize_solution(DG1DSolver.initial_state)
+sys.stdout = Tee("NormAndEnergy.txt")
+
+#solver.plot_solution(0.0, "graphs/BeforeSim.png")
+solver.runDEBUG(T, cfl)
+#solver.plot_solution(0.0, "graphs/AfterSim.png")
+exit()
+
+
+
+
+
+
+
+
+
+
 
 D_values = [20, 40, 80, 160, 320, 640]
 
@@ -73,22 +96,22 @@ print("================================\n")
 # -------------------------
 # CONVERGENCE LOOP
 # -------------------------
-for D in D_values:
+for Dp in D_values:
 
     print("\n==============================")
-    print(f"Running D = {D}, N = {N}")
+    print(f"Running D = {Dp}, N = {N}")
     print("==============================")
 
-    x_grid = np.linspace(left_bound, right_bound, D + 1)
+    x_grid = np.linspace(left_bound, right_bound, Dp + 1)
 
-    solver = DG1DSolver.DG1DSolver(x_grid, N, L)
+    solver = DG1DSolver.DG1DSolver(x_grid, N, L, 10.0, 4, f"h_refinement{Dp}.csv")
 
     solver.initialize_solution(DG1DSolver.initial_state)
 
     solver.run(T, cfl)
 
-    err = solver.L2_error(T)
-    h   = (right_bound - left_bound) / D
+    err = solver.L2_error_self(solver.u_fine)
+    h   = (right_bound - left_bound) / Dp
 
     errors.append(err)
     hs.append(h)
@@ -147,11 +170,11 @@ for Np in N_values:
     print(f"Running D = {D_fixed}, N = {Np}")
     print("------------------------------")
 
-    solver = DG1DSolver.DG1DSolver(x_grid, Np, L)
+    solver = DG1DSolver.DG1DSolver(x_grid, Np, L, 10.0, 4, f"p_refinement{Np}.csv")
     solver.initialize_solution(DG1DSolver.initial_state)
     solver.run(T, cfl)
 
-    err = solver.L2_error(T)
+    err = solver.L2_error_self(solver.u_fine)
     p_errors.append(err)
 
 print("\n==============================")
