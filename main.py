@@ -22,6 +22,7 @@ class Tee:
     def close(self):
         self.file.close()
 
+
 # -------------------------
 # PARAMETERS
 # -------------------------
@@ -33,35 +34,15 @@ R = 15.0
 P = 4
 
 T = 50.0
-cfl = 0.4      # doesn't corrupt the exact solution at fine grids
-D = 160
+cfl = 0.1
+D = 640
 
-x_grid = np.linspace(left_bound, right_bound, D + 1)
-solver = DG1DSolver.DG1DSolver(x_grid, N, L, R, P, "probe_file.csv")
-solver.initialize_solution(DG1DSolver.initial_state)
-sys.stdout = Tee("NormAndEnergy.txt")
-
-#solver.plot_solution(0.0, "graphs/BeforeSim.png")
-solver.runDEBUG(T, cfl)
-#solver.plot_solution(0.0, "graphs/AfterSim.png")
-exit()
-
-
-
-
-
-
-
-
-
-
-
-D_values = [20, 40, 80, 160, 320, 640]
-
+D_values = [20, 40, 80, 160, 320]
 errors = []
 hs = []
 
-run_tag = f"N{N}_T{T}_cfl{cfl}_Dmax{max(D_values)}"
+fine_filepath = "probes/h_refinement_probe_file_fine.csv"
+run_tag = f"N{N}_T{T}_cfl{cfl}_Dmax{max(D_values)}_Finepath{fine_filepath[-7:-4]}"
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
 complete_filename = f"convergence_{run_tag}_{timestamp}"
@@ -69,6 +50,7 @@ log_file = f"logs/{complete_filename}.txt"
 
 os.makedirs("logs", exist_ok=True)
 os.makedirs("graphs", exist_ok=True)
+os.makedirs("probelogs", exist_ok=True)
 sys.stdout = Tee(log_file)
 
 print("================================")
@@ -91,6 +73,23 @@ filtered_lines = [
 
 print("\n".join(filtered_lines))
 
+if not os.path.isfile(fine_filepath):
+    print("fine_filepath not found. Running fine h_refinement for convergence testing...")
+    print(f"D={D}, N={N}, T={T}, cfl={cfl}, R={R}, P={P}, left_bound={left_bound}, right_bound={right_bound}")
+    print(f"Fine filepath is '{fine_filepath}'")
+
+    x_ref = np.linspace(left_bound, right_bound, D + 1)
+    s_ref = DG1DSolver.DG1DSolver(x_ref, N, L, R, P, fine_filepath)
+    s_ref.initialize_solution(DG1DSolver.initial_state)
+    s_ref.runDEBUG(T, cfl)
+
+    fine_probe = np.array(s_ref._probe_buffer)
+    print("Completed propagation")
+
+else:
+    print(f"Loading {fine_filepath}")
+    fine_probe = np.loadtxt(fine_filepath, delimiter=" ", skiprows=1)  # (M, 4) array of (t, U, q, p)
+
 print("================================\n")
 
 # -------------------------
@@ -98,20 +97,31 @@ print("================================\n")
 # -------------------------
 for Dp in D_values:
 
+    if os.path.isfile(f"probes/h_refinement{Dp}.csv"):
+        coarse_probe = np.loadtxt(f"probes/h_refinement{Dp}.csv", delimiter=" ", skiprows=1)
+        err = DG1DSolver.DG1DSolver.L2_error_probe_state_diff(coarse_probe, fine_probe)
+        h = np.log10(Dp)
+        print(f"L2 Error for D={Dp} compared to D={D}: {err}")
+        errors.append(err)
+        hs.append(h)
+        continue
+
     print("\n==============================")
     print(f"Running D = {Dp}, N = {N}")
     print("==============================")
 
     x_grid = np.linspace(left_bound, right_bound, Dp + 1)
 
-    solver = DG1DSolver.DG1DSolver(x_grid, N, L, 10.0, 4, f"h_refinement{Dp}.csv")
+    solver = DG1DSolver.DG1DSolver(x_grid, N, L, R, P, f"probes/h_refinement{Dp}.csv")
 
     solver.initialize_solution(DG1DSolver.initial_state)
 
-    solver.run(T, cfl)
+    solver.runDEBUG(T, cfl)
 
-    err = solver.L2_error_self(solver.u_fine)
+    err = solver.L2_error_probe_state(fine_probe)
     h   = (right_bound - left_bound) / Dp
+
+    print(f"L2 Error for D={Dp} compared to D={D}: {err}")
 
     errors.append(err)
     hs.append(h)
@@ -143,6 +153,8 @@ plt.grid(True, which="both")
 plt.savefig(f"graphs/{complete_filename}_Log_Log.png", dpi=300)
 plt.show()
 
+exit()
+
 #---------------------------
 # Final Graph Plotting
 #---------------------------
@@ -170,9 +182,9 @@ for Np in N_values:
     print(f"Running D = {D_fixed}, N = {Np}")
     print("------------------------------")
 
-    solver = DG1DSolver.DG1DSolver(x_grid, Np, L, 10.0, 4, f"p_refinement{Np}.csv")
+    solver = DG1DSolver.DG1DSolver(x_grid, Np, L, R, P, f"p_refinement{Np}.csv")
     solver.initialize_solution(DG1DSolver.initial_state)
-    solver.run(T, cfl)
+    solver.runDEBUG(T, cfl)
 
     err = solver.L2_error_self(solver.u_fine)
     p_errors.append(err)

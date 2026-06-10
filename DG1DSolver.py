@@ -135,7 +135,8 @@ class DG1DSolver:
         H = 0 for rho ≤ R (outside the layer).
         """
         rho   = self.x_nodes          # (D, N+1), your computational coordinate
-        layer = rho > self.R          # mask for interior of layer
+        rho_R = self.x[np.argmin(np.abs(self.x - self.R))] #closes interface
+        layer = rho > rho_R          # mask for interior of layer
 
         H     = np.zeros_like(rho)
 
@@ -238,6 +239,8 @@ class DG1DSolver:
         # vol[e, k] = sum_m w_m * f_m * D_Phi[m, k]
         vol_p = (self.quad_weights * q) @ self.D_Phi   # driven by q
         vol_q = (self.quad_weights * p) @ self.D_Phi   # driven by p
+        #vol_p = np.einsum('i,ei,ij->ej', self.quad_weights, q, self.D_Phi)
+        #vol_q = np.einsum('i,ei,ij->ej', self.quad_weights, p, self.D_Phi)
 
         # ---- interface values -------------------------
         p_minus_L = np.roll(p[:, -1],  1)
@@ -359,6 +362,51 @@ class DG1DSolver:
                                      diff[e, :, 2]**2)
             ) * self.h[e]
         return np.sqrt(err)
+    
+    def L2_error_probe_state(self, u_fine : npt.NDArray[np.float64]) -> float:
+        """
+        L2 error between this solver's scri waveform and a reference (fine) waveform.
+        Both inputs are probe buffers: lists of (t, U, q, p) tuples.
+        Interpolates the fine solution onto the coarse time grid before differencing.
+        """
+        u_coarse = np.array(self._probe_buffer)   # (M_coarse, 4)
+
+        t_coarse = u_coarse[:, 0]
+        t_fine   = u_fine[:, 0]
+
+        # interpolate fine onto coarse time grid
+        U_fine_interp = np.interp(t_coarse, t_fine, u_fine[:, 1])
+        #q_fine_interp = np.interp(t_coarse, t_fine, u_fine[:, 2])
+        #p_fine_interp = np.interp(t_coarse, t_fine, u_fine[:, 3])
+
+        dU = u_coarse[:, 1] - U_fine_interp
+        #dq = u_coarse[:, 2] - q_fine_interp
+        #dp = u_coarse[:, 3] - p_fine_interp
+
+        return np.sqrt(np.trapz(dU**2, t_coarse))
+
+    @staticmethod 
+    def L2_error_probe_state_diff(u_coarse: npt.NDArray[np.float64], u_fine: npt.NDArray[np.float64]) -> float:
+        """
+        L2 error between this solver's scri waveform and a reference (fine) waveform.
+        Both inputs are probe buffers: lists of (t, U, q, p) tuples.
+        Interpolates the fine solution onto the coarse time grid before differencing.
+        """
+
+        t_coarse = u_coarse[:, 0]
+        t_fine   = u_fine[:, 0]
+
+        # interpolate fine onto coarse time grid
+        U_fine_interp = np.interp(t_coarse, t_fine, u_fine[:, 1])
+        #q_fine_interp = np.interp(t_coarse, t_fine, u_fine[:, 2])
+        #p_fine_interp = np.interp(t_coarse, t_fine, u_fine[:, 3])
+
+        dU = u_coarse[:, 1] - U_fine_interp
+        #dq = u_coarse[:, 2] - q_fine_interp
+        #dp = u_coarse[:, 3] - p_fine_interp
+
+        return np.sqrt(np.trapz(dU**2, t_coarse))
+        
 
     def waveform_at_scri(self) -> tuple[float, float, float]:
         """
@@ -454,11 +502,11 @@ class DG1DSolver:
         self._probe_buffer = []
     
     def log_probe(self, t: float):
-        self._probe_buffer.append((t, self.u[-1, -1, 0]))
+        self._probe_buffer.append((t, self.u[-1, -1, 0], self.u[-1, -1, 1], self.u[-1, -1, 2]))
     
     def flush_probe(self):
         data = np.array(self._probe_buffer)
-        np.savetxt(self.probe_file, data, delimiter=" ", header="t, u_edge", comments="")
+        np.savetxt(self.probe_file, data, delimiter=" ", header="t, u_edge, q_edge, p_edge", comments="")
 
 
 # ------------------------------------------------------------------
@@ -477,9 +525,9 @@ def initial_state(
     fx : dU/dx(x, 0) = q(x, 0)
     g  : -dU/dt(x, 0) = p(x, 0)
     """
-    f = (np.sin(6*x) * np.exp(-0.5 * x**2)).astype(np.float64)
-    fx = (-np.exp(-0.5 * x**2) * (x*np.sin(6*x) - 6*np.cos(6*x))).astype(np.float64)
-    g = -(np.exp(-0.5 * x**2) * (x*np.sin(6*x) - 6*np.cos(6*x))).astype(np.float64)
+    f = np.exp(-0.5 * x**2)
+    fx = -x * np.exp(-0.5 * x**2)
+    g = -x * np.exp(-0.5 * x**2)
     return f, fx, g
 
 def effective_potential(x: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
