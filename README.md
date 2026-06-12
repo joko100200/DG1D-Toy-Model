@@ -156,13 +156,13 @@ superconvergence at future null infinity.
 
 Example:
 
-| D (elements) | Relative L2 Error at $\mathscr{I}^+$ |
-|---|---|
-| 20  | 9.33e-01 |
-| 40  | 2.98e-01 |
-| 80  | 7.64e-03 |
-| 160 | 3.86e-05 |
-| 320 | 1.59e-07 |
+| D (elements) | Relative L2 Error at $\mathscr{I}^+$ | $p \approx$ |
+|---|---|---|
+| 20  | 9.33e-01 |  N/A |
+| 40  | 2.98e-01 | 1.645|
+| 80  | 7.64e-03 | 5.288|
+| 160 | 3.86e-05 | 7.628|
+| 320 | 1.59e-07 | 7.920|
 
 Observed rates approach
 
