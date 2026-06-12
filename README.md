@@ -5,7 +5,7 @@ wave equation with a hyperboloidal layer. The code uses Gauss-Lobatto-Legendre
 (GLL) quadrature, Lagrange nodal basis functions, upwind numerical fluxes, and
 classical RK4 time integration.
 
-The hyperboloidal layer compactifies future null infinity (\(\mathscr{I}^+\))
+The hyperboloidal layer compactifies future null infinity ($\mathscr{I}^+$)
 to a finite coordinate location, allowing outgoing radiation to leave the domain
 without artificial outer boundary conditions.
 
@@ -13,9 +13,9 @@ This implementation is based on methods from the literature listed in the Refere
 
 The solver demonstrates:
 
-- \(N+1\) convergence at generic grid points.
-- Superconvergent behavior approaching \(2N\) at \(\mathscr{I}^+\).
-- Exponential convergence under \(p\)-refinement.
+- $N+1$ convergence at generic grid points.
+- Superconvergent behavior approaching $2N$ at $\mathscr{I}^+$.
+- Exponential convergence under $p$-refinement.
 - Stable propagation of outgoing waves through a hyperboloidal compactification layer.
 
 ---
@@ -24,104 +24,71 @@ The solver demonstrates:
 
 The code evolves the scalar wave equation
 
-\[
-\partial_{tt}U = \partial_{xx}U - V(x)U
-\]
+$\partial_{tt}U = \partial_{xx}U - V(x)U$
 
 written as a first-order system
 
-\[
-\partial_t U = -p,
-\]
+$\partial_t U = -p,$
 
-\[
-\partial_t q = -\partial_x p,
-\]
+$\partial_t q = -\partial_x p,$
 
-\[
-\partial_t p = -\partial_x q + V(x)U,
-\]
+$\partial_t p = -\partial_x q + V(x)U,$
 
 where
 
-\[
-q = \partial_x U,
-\qquad
-p = -\partial_t U.
-\]
+$q = \partial_x U,\qquad p = -\partial_t U.$
 
 For convergence studies the default potential is
 
-\[
-V(x)=\frac{6}{x^2},
-\]
+$V(x)=\frac{6}{x^2},$
 
-corresponding to the \(l=2\) centrifugal barrier of the flat-space scalar wave equation.
+corresponding to the $l=2$ centrifugal barrier of the flat-space scalar wave equation.
 
 ---
 
 ## Hyperboloidal Layer
 
-The computational coordinate \(\rho\) is related to the physical radius \(r\) through
+The computational coordinate $\rho$ is related to the physical radius $r$ through
 
-\[
-r = \frac{\rho}{\Omega(\rho)},
-\]
+$r = \frac{\rho}{\Omega(\rho)},$
 
 with compactification function
 
-\[
-\Omega(\rho)
-=
-1 -
-\left(
-\frac{\rho-R}{s-R}
-\right)^P.
-\]
+$\Omega(\rho) = 1 - \left(\frac{\rho-R}{s-R}\right)^P.$
 
-The layer begins at \(\rho=R\) and future null infinity is located at
+The layer begins at $\rho=R$ and future null infinity is located at
 
-\[
-\rho=s.
-\]
+$\rho=s.$
 
-Outgoing radiation reaches \(\mathscr{I}^+\) in finite computational time and leaves
+Outgoing radiation reaches $\mathscr{I}^+$ in finite computational time and leaves
 the domain without numerical reflection.
 
 ---
 
 ## Spatial Discretization
 
-The computational domain is partitioned into \(D\) elements
+The computational domain is partitioned into $D$ elements
 
-\[
-I_e=[x_e,x_{e+1}],
-\]
+$I_e=[x_e,x_{e+1}],$
 
 each mapped to the reference element
 
-\[
-\xi\in[-1,1].
-\]
+$\xi \in [-1,1].$
 
-Within each element the solution is approximated by degree-\(N\) Lagrange
+Within each element the solution is approximated by degree-$N$ Lagrange
 polynomials defined on Gauss-Lobatto-Legendre nodes.
 
 For a nodal basis,
 
-\[
-\phi_i(\xi_j)=\delta_{ij},
-\]
+$\phi_i(\xi_j)=\delta_{ij},$
 
 so the DG coefficients are simply nodal values.
 
 Because quadrature and interpolation use the same GLL nodes, the mass matrix is diagonal,
 
-\[
-M_{ij}=w_i\delta_{ij},
-\]
+$M_{ij}=w_i\delta_{ij},$
 
-making application of \(M^{-1}\) an elementwise division by quadrature weights.
+making application of $M^{-1}$ an elementwise division by quadrature weights.
 
 ---
 
@@ -131,21 +98,9 @@ The first-order wave system is evolved using exact upwind fluxes.
 
 At each interface,
 
-\[
-\hat q
-=
-\frac12(q_-+q_+)
-+
-\frac12(p_- - p_+),
-\]
+$\hat q = \frac12(q_-+q_+) + \frac12(p_- - p_+),$
 
-\[
-\hat p
-=
-\frac12(p_-+p_+)
-+
-\frac12(q_- - q_+).
-\]
+$\hat p = \frac12(p_-+p_+) + \frac12(q_- - q_+).$
 
 These fluxes provide stable communication between neighboring elements and
 enforce outgoing-wave behavior at the outer boundary.
@@ -156,11 +111,7 @@ enforce outgoing-wave behavior at the outer boundary.
 
 The semi-discrete DG system
 
-\[
-\frac{d\mathbf u}{dt}
-=
-\mathcal L(\mathbf u)
-\]
+$\frac{d\mathbf u}{dt} = \mathcal L(\mathbf u)$
 
 is advanced using classical fourth-order Runge-Kutta (RK4).
 
@@ -173,47 +124,25 @@ spatial discretization error.
 
 The primary verification problem uses the exact outgoing solution of
 
-\[
-U_{tt}
-=
-U_{xx}
--
-\frac{6}{x^2}U.
-\]
+$U_{tt} = U_{xx} - \frac{6}{x^2}U.$
 
 The exact solution is
 
-\[
-U(t,r)
-=
-f''(u)
-+
-\frac{3}{r}f'(u)
-+
-\frac{3}{r^2}f(u),
-\]
+$U(t,r) = f''(u) + \frac{3}{r}f'(u) + \frac{3}{r^2}f(u),$
 
 with
 
-\[
-u=t-r+x_0,
-\]
+$u = t - r + x_0,$
 
 and
 
-\[
-f(u)=\sin(u)e^{-u^2}.
-\]
+$f(u)=\sin(u)e^{-u^2}.$
 
 At future null infinity,
 
-\[
-U|_{\mathscr I^+}
-=
-f''(u),
-\]
+$U|_{\mathscr I^+} = f''(u),$
 
-since the \(1/r\) and \(1/r^2\) terms vanish.
+since the $1/r$ and $1/r^2$ terms vanish.
 
 ---
 
@@ -221,13 +150,13 @@ since the \(1/r\) and \(1/r^2\) terms vanish.
 
 ### h-refinement
 
-For fixed polynomial degree \(N=4\), the solver exhibits the expected
-\(N+1\) convergence rate at generic grid points and approximately \(2N\)
+For fixed polynomial degree $N=4$, the solver exhibits the expected
+$N+1$ convergence rate at generic grid points and approximately $2N$
 superconvergence at future null infinity.
 
 Example:
 
-| D (elements) | Relative L2 Error at \(\mathscr{I}^+\) |
+| D (elements) | Relative L2 Error at $\mathscr{I}^+$ |
 |---|---|
 | 20  | 9.33e-01 |
 | 40  | 2.98e-01 |
@@ -237,11 +166,11 @@ Example:
 
 Observed rates approach
 
-\[
-p \approx 8,
-\]
+$p \approx 8,$
 
-consistent with superconvergent DG behavior for \(N=4\).
+consistent with superconvergent DG behavior for $N=4$.
+
+---
 
 ### p-refinement
 
@@ -250,7 +179,7 @@ polynomial degree.
 
 Example:
 
-| N | Relative L2 Error at \(\mathscr{I}^+\) |
+| N | Relative L2 Error at $\mathscr{I}^+$ |
 |---|---|
 | 2 | 2.64e-01 |
 | 3 | 4.36e-03 |
@@ -270,7 +199,7 @@ This confirms spectral convergence of the DG discretization.
 - Strong-form DG differentiation
 - Exact upwind fluxes
 - Hyperboloidal compactification
-- Direct extraction of waveforms at \(\mathscr{I}^+\)
+- Direct extraction of waveforms at $\mathscr{I}^+$
 - h-refinement studies
 - p-refinement studies
 - Exact-solution verification
