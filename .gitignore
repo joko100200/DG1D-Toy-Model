@@ -1,6 +1,6 @@
 *.png
 graphs/
 logs/
+probes/
 *.txt
 *.csv
-Potentialtmp/
