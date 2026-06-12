@@ -1,143 +1,292 @@
-# Discontinuous Galerkin Solver for the 1D Wave Equation
+# Discontinuous Galerkin Solver for the Hyperboloidal Wave Equation
 
-A high-order nodal discontinuous Galerkin (DG) solver for the 1D wave equation,
-using Gauss-Lobatto-Legendre (GLL) quadrature, upwind fluxes, and RK4 time integration.
-Achieves order $N+1$ convergence in $h$-refinement and exponential convergence in $p$-refinement.
+A high-order nodal discontinuous Galerkin (DG) solver for the one-dimensional
+wave equation with a hyperboloidal layer. The code uses Gauss-Lobatto-Legendre
+(GLL) quadrature, Lagrange nodal basis functions, upwind numerical fluxes, and
+classical RK4 time integration.
+
+The hyperboloidal layer compactifies future null infinity (\(\mathscr{I}^+\))
+to a finite coordinate location, allowing outgoing radiation to leave the domain
+without artificial outer boundary conditions.
+
+This implementation is based on methods from the literature listed in the References section below.
+
+The solver demonstrates:
+
+- \(N+1\) convergence at generic grid points.
+- Superconvergent behavior approaching \(2N\) at \(\mathscr{I}^+\).
+- Exponential convergence under \(p\)-refinement.
+- Stable propagation of outgoing waves through a hyperboloidal compactification layer.
+
+---
+
+## Problem
+
+The code evolves the scalar wave equation
+
+\[
+\partial_{tt}U = \partial_{xx}U - V(x)U
+\]
+
+written as a first-order system
+
+\[
+\partial_t U = -p,
+\]
+
+\[
+\partial_t q = -\partial_x p,
+\]
+
+\[
+\partial_t p = -\partial_x q + V(x)U,
+\]
+
+where
+
+\[
+q = \partial_x U,
+\qquad
+p = -\partial_t U.
+\]
+
+For convergence studies the default potential is
+
+\[
+V(x)=\frac{6}{x^2},
+\]
+
+corresponding to the \(l=2\) centrifugal barrier of the flat-space scalar wave equation.
+
+---
+
+## Hyperboloidal Layer
+
+The computational coordinate \(\rho\) is related to the physical radius \(r\) through
+
+\[
+r = \frac{\rho}{\Omega(\rho)},
+\]
+
+with compactification function
+
+\[
+\Omega(\rho)
+=
+1 -
+\left(
+\frac{\rho-R}{s-R}
+\right)^P.
+\]
+
+The layer begins at \(\rho=R\) and future null infinity is located at
+
+\[
+\rho=s.
+\]
+
+Outgoing radiation reaches \(\mathscr{I}^+\) in finite computational time and leaves
+the domain without numerical reflection.
+
+---
+
+## Spatial Discretization
+
+The computational domain is partitioned into \(D\) elements
+
+\[
+I_e=[x_e,x_{e+1}],
+\]
+
+each mapped to the reference element
+
+\[
+\xi\in[-1,1].
+\]
+
+Within each element the solution is approximated by degree-\(N\) Lagrange
+polynomials defined on Gauss-Lobatto-Legendre nodes.
+
+For a nodal basis,
+
+\[
+\phi_i(\xi_j)=\delta_{ij},
+\]
+
+so the DG coefficients are simply nodal values.
+
+Because quadrature and interpolation use the same GLL nodes, the mass matrix is diagonal,
+
+\[
+M_{ij}=w_i\delta_{ij},
+\]
+
+making application of \(M^{-1}\) an elementwise division by quadrature weights.
+
+---
+
+## Numerical Fluxes
+
+The first-order wave system is evolved using exact upwind fluxes.
+
+At each interface,
+
+\[
+\hat q
+=
+\frac12(q_-+q_+)
++
+\frac12(p_- - p_+),
+\]
+
+\[
+\hat p
+=
+\frac12(p_-+p_+)
++
+\frac12(q_- - q_+).
+\]
+
+These fluxes provide stable communication between neighboring elements and
+enforce outgoing-wave behavior at the outer boundary.
+
+---
+
+## Time Integration
+
+The semi-discrete DG system
+
+\[
+\frac{d\mathbf u}{dt}
+=
+\mathcal L(\mathbf u)
+\]
+
+is advanced using classical fourth-order Runge-Kutta (RK4).
+
+Convergence studies are typically performed with a fixed timestep to isolate
+spatial discretization error.
+
+---
+
+## Verification
+
+The primary verification problem uses the exact outgoing solution of
+
+\[
+U_{tt}
+=
+U_{xx}
+-
+\frac{6}{x^2}U.
+\]
+
+The exact solution is
+
+\[
+U(t,r)
+=
+f''(u)
++
+\frac{3}{r}f'(u)
++
+\frac{3}{r^2}f(u),
+\]
+
+with
+
+\[
+u=t-r+x_0,
+\]
+
+and
+
+\[
+f(u)=\sin(u)e^{-u^2}.
+\]
+
+At future null infinity,
+
+\[
+U|_{\mathscr I^+}
+=
+f''(u),
+\]
+
+since the \(1/r\) and \(1/r^2\) terms vanish.
 
 ---
 
 ## Convergence Results
 
-| D (elements) | L2 Error | Convergence Rate |
-|---|---|---|
-| 20  | 3.53e+00 | —     |
-| 40  | 3.18e-02 | 6.80  |
-| 80  | 3.02e-04 | 6.72  |
-| 160 | 2.33e-06 | 7.02  |
-| 320 | 1.83e-08 | 6.99  |
-| 640 | 1.53e-10 | 6.90  |
+### h-refinement
 
-*N=6, T=5.0, domain [-10, 20], CFL=0.1. Expected rate: N+1 = 7.*
+For fixed polynomial degree \(N=4\), the solver exhibits the expected
+\(N+1\) convergence rate at generic grid points and approximately \(2N\)
+superconvergence at future null infinity.
 
-| N (polynomial order) | L2 Error |
+Example:
+
+| D (elements) | Relative L2 Error at \(\mathscr{I}^+\) |
 |---|---|
-| 2 | 1.05e+00 |
-| 3 | 2.08e-02 |
-| 4 | 1.00e-03 |
-| 5 | 5.09e-05 |
-| 6 | 2.33e-06 |
+| 20  | 9.33e-01 |
+| 40  | 2.98e-01 |
+| 80  | 7.64e-03 |
+| 160 | 3.86e-05 |
+| 320 | 1.59e-07 |
 
-*D=160 fixed. Exponential decay confirms spectral convergence in p.*
+Observed rates approach
 
----
+\[
+p \approx 8,
+\]
 
-## Method
+consistent with superconvergent DG behavior for \(N=4\).
 
-### 1. Problem and State Vector
+### p-refinement
 
-Solveing the second-order wave equation
+For fixed mesh resolution, errors decrease exponentially with increasing
+polynomial degree.
 
-$$\partial_{tt} U = \partial_{xx} U - V(x)U$$
+Example:
 
-rewritten as a first-order system with $q = \partial_x U$ and $p = \partial_t U$:
+| N | Relative L2 Error at \(\mathscr{I}^+\) |
+|---|---|
+| 2 | 2.64e-01 |
+| 3 | 4.36e-03 |
+| 4 | 3.86e-05 |
+| 5 | 2.62e-07 |
+| 6 | 1.62e-09 |
 
-$$\partial_t U = p$$
-
-$$\partial_t q = \partial_x p$$
-
-$$\partial_t p = \partial_x q - V(x)U$$
-
-The domain $[x_L, x_R]$ is partitioned into $D$ elements $I_e = [x_e, x_{e+1}]$
-with half-width $h_e = (x_{e+1} - x_e)/2$.
-
----
-
-### 2. Reference Element and Basis
-
-Each element is mapped to the reference element $[-1, 1]$ via
-
-$$x = x_e + h_e(\xi + 1), \qquad \xi \in [-1, 1]$$
-
-On the reference element we place $N+1$ GLL nodes $\lbrace \xi_j \rbrace_{j=0}^{N}$
-with quadrature weights $\lbrace w_j \rbrace$. The solution on element $e$ is
-approximated by the degree-$N$ nodal interpolant
-
-$$U_h\big|_{I_e}(\xi, t) = \sum_{j=0}^{N} U_j^e(t)\, \phi_j(\xi)$$
-
-where $\phi_j$ are Lagrange basis functions satisfying $\phi_j(\xi_m) = \delta_{jm}$,
-so the degrees of freedom are simply nodal values $U_j^e = U_h(\xi_j, t)$.
-Identical expansions hold for $q_h$ and $p_h$.
+This confirms spectral convergence of the DG discretization.
 
 ---
 
-### 3. Weak Formulation
+## Features
 
-Multiplying the $p$-equation by test function $\phi_i \in \mathcal{P}^N$ and
-integrating over the reference element, then integrating by parts:
-
-$$h_e \int_{-1}^{1} \partial_t p_h\, \phi_i\, d\xi = -\int_{-1}^{1} q_h\, \phi_i'\, d\xi + \Big[\hat{q}\, \phi_i\Big]_{-1}^{1}$$
-
-where $\hat{q}$ is the numerical flux at element boundaries.
-The $q$-equation is identical with $p \leftrightarrow q$.
-
----
-
-### 4. Matrix Form
-
-The mass matrix under GLL quadrature is diagonal:
-
-$$M_{ij} = \int_{-1}^{1} \phi_i\, \phi_j\, d\xi \approx \sum_m w_m\, \phi_i(\xi_m)\, \phi_j(\xi_m) = w_i\, \delta_{ij}$$
-
-The volume term is evaluated as:
-
-$$\big[S^T \mathbf{q}\big]_i \approx \big[(\mathbf{w} \odot \mathbf{q})^T D_\Phi\big]_i$$
-
-where $(D_\Phi)_{im} = \phi_i'(\xi_m)$ is the differentiation matrix and
-$\odot$ denotes elementwise multiplication. The boundary vector is
-
-$$(\mathbf{b}_p)_i = \begin{cases} -\hat{q}_L & i = 0 \\ +\hat{q}_R & i = N \\ 0 & \text{otherwise} \end{cases}$$
-
-The semi-discrete system on element $e$ is:
-
-$$h_e M\, \dot{\mathbf{p}}^e = \mathbf{b}_p^e - (\mathbf{w} \odot \mathbf{q}^e)^T D_\Phi - h_e M(\mathbf{V}^e \odot \mathbf{U}^e)$$
-
-$$h_e M\, \dot{\mathbf{q}}^e = \mathbf{b}_q^e - (\mathbf{w} \odot \mathbf{p}^e)^T D_\Phi$$
-
-$$\dot{\mathbf{U}}^e = \mathbf{p}^e$$
-
-Since $M$ is diagonal, applying $M^{-1}$ is trivial:
-
-$$\dot{\mathbf{p}}^e = \frac{1}{h_e} M^{-1} \Big[\mathbf{b}_p^e - (\mathbf{w} \odot \mathbf{q}^e)^T D_\Phi\Big] - \mathbf{V}^e \odot \mathbf{U}^e$$
-
-$$\dot{\mathbf{q}}^e = \frac{1}{h_e} M^{-1} \Big[\mathbf{b}_q^e - (\mathbf{w} \odot \mathbf{p}^e)^T D_\Phi\Big]$$
+- Nodal DG formulation
+- Gauss-Lobatto-Legendre quadrature
+- Diagonal mass matrix
+- Strong-form DG differentiation
+- Exact upwind fluxes
+- Hyperboloidal compactification
+- Direct extraction of waveforms at \(\mathscr{I}^+\)
+- h-refinement studies
+- p-refinement studies
+- Exact-solution verification
 
 ---
 
-### 5. Upwind Fluxes
+## Future Work
 
-For the wave system, the exact upwind fluxes at left and right interfaces are:
+Planned extensions include:
 
-$$\hat{q}_L = \tfrac{1}{2}(q_- + q_+) - \tfrac{1}{2}(p_- - p_+)$$
-
-$$\hat{q}_R = \tfrac{1}{2}(q_- + q_+) - \tfrac{1}{2}(p_- - p_+)$$
-
-$$\hat{p}_L = \tfrac{1}{2}(p_- + p_+) - \tfrac{1}{2}(q_- - q_+)$$
-
-$$\hat{p}_R = \tfrac{1}{2}(p_- + p_+) - \tfrac{1}{2}(q_- - q_+)$$
-
-where $\pm$ denotes the left/right element trace at each interface.
-
----
-
-### 6. Time Integration
-
-The semi-discrete system $\dot{\mathbf{u}} = \mathcal{L}(\mathbf{u})$ is advanced
-with classical RK4. The timestep is set by the CFL condition:
-
-$$\Delta t = \frac{c_{\mathrm{CFL}} \cdot \min_e h_e}{2N + 1}$$
-
-where $2N+1$ accounts for GLL node clustering near element boundaries.
-All convergence runs used $c_{\mathrm{CFL}} = 0.1$.
+- Pöschl-Teller scattering potentials
+- Quasinormal mode extraction
+- Black-hole perturbation potentials
+- Distributionally forced wave equations
+- Teukolsky-equation-inspired test problems
+- Investigation of long-range potential behavior under hyperboloidal compactification
 
 ---
 
@@ -145,23 +294,41 @@ All convergence runs used $c_{\mathrm{CFL}} = 0.1$.
 
 ```python
 import numpy as np
-from dg1d import DG1DSolver, initial_state, effective_potential
+from HyperboloidalDG import HyperboloidalWaveDG
 
-x_grid = np.linspace(-10.0, 20.0, 81)   # 80 elements
-solver  = DG1DSolver(x_grid, N=6, L=50)
+x_grid = np.linspace(1.0, 50.0, 161)
+
+solver = HyperboloidalWaveDG(
+    x_grid=x_grid,
+    N=4,
+    R=25.0,
+    P=4
+)
+
 solver.initialize_solution(initial_state)
-solver.run(T=5.0, cfl=0.1)
-solver.plot_solution(t=5.0)
-```
+solver.run(T=60.0)
 
-### Convergence Tests
+## References
 
-The convergence results reported above can be reproduced by running:
+The implementation of the DG scheme and hyperboloidal layer was heavily influenced by:
 
-```bash
-python main.py
-```
+Vishal, M., Field, S. E., Rink, K., Gottlieb, S., & Khanna, G. (2024).
+Toward exponentially-convergent simulations of extreme-mass-ratio inspirals: A time-domain solver for the scalar Teukolsky equation with singular source terms.
+*Physical Review D*, 110(10), 104009.
+DOI: 10.1103/PhysRevD.110.104009
+URL: http://dx.doi.org/10.1103/PhysRevD.110.104009
 
-This script performs both an $h$-refinement study (fixed $N$, increasing $D$) and a
-$p$-refinement study (fixed $D$, increasing $N$), printing L2 errors and observed
-convergence rates for each run.
+Vishal, M., Field, S. E., Gottlieb, S., & Ryan, J. (2025).
+Superconvergent discontinuous Galerkin method for the scalar Teukolsky equation on hyperboloidal domains: Efficient waveform and self-force computation.
+*General Relativity and Gravitation*, 57(7).
+DOI: 10.1007/s10714-025-03435-9
+URL: http://dx.doi.org/10.1007/s10714-025-03435-9
+
+Field, S. E., Gottlieb, S., Khanna, G., & McClain, E. (2022).
+Discontinuous Galerkin Method for Linear Wave Equations Involving Derivatives of the Dirac Delta Distribution.
+In *Spectral and High Order Methods for Partial Differential Equations ICOSAHOM 2020+1* (pp. 307–321).
+Springer International Publishing.
+DOI: 10.1007/978-3-031-20432-6_19
+URL: http://dx.doi.org/10.1007/978-3-031-20432-6_19
+
+Many of the verification tests, error measures, and convergence expectations used in this repository follow the methodology in Vishal et al. (2024).

@@ -6,26 +6,29 @@ from collections.abc import Callable
 
 class DG1DSolver:
     """
-    Discontinuous Galerkin solver for the 1D wave equation with hyperboloidal compactification.
+    Nodal discontinuous Galerkin solver for the first-order scalar wave equation
+    with a hyperboloidal layer.
 
-    Solves the first-order system in hyperboloidal coordinates (τ, ρ):
-        dU/dτ = -p
-        dq/dτ = coeff * (-dq_spatial - H * dp_spatial) - H * J*V*U
-        dp/dτ = coeff * (-dp_spatial - H * dq_spatial) - J*V*U
+    The evolved variables are
 
-    where coeff = 1/(1+H), J*V is precomputed to avoid 0/0 at ρ=s,
-    and H=0 outside the hyperboloidal layer so the standard wave equation
-    is recovered there.
+        U = scalar field = u[:, :, 0]
+        q = ∂U/∂r        = u[:, :, 1]
+        p = -∂U/∂t       = u[:, :, 2]
 
-    State shape: u (D, N+1, 3)
-        u[:, :, 0] = U   displacement
-        u[:, :, 1] = q   spatial derivative of U
-        u[:, :, 2] = p   time derivative of U  (p = -∂_τ U)
+    The domain consists of a standard physical region and a hyperboloidal layer
+    which compactifies future null infinity (scri+) to the finite coordinate
+    location ρ = s.
 
-    GLL nodes + Lagrange basis give Phi_q = I, so:
-        M     = diag(quad_weights)
-        M^-1  = diag(1/quad_weights)
-    All mass matrix operations reduce to elementwise division by quad_weights.
+    The discretization uses:
+        - Gauss-Lobatto-Legendre nodes
+        - Lagrange interpolating polynomials
+        - Strong-form DG differentiation
+        - Upwind numerical fluxes
+        - Explicit RK4 time integration
+
+    Because the basis is nodal at the quadrature points, the mass matrix is
+    diagonal and all mass matrix inversions reduce to elementwise division by
+    the quadrature weights.
     """
 
     def __init__(
@@ -70,7 +73,7 @@ class DG1DSolver:
         self.coeff_at_nodes = 1.0 / (1.0 + self.H_at_nodes)   # (D, N+1), = 1/2 at ρ=s
         
         # J*V precomputed analytically to avoid 0/0 at ρ=s where H→1
-        self.JV_at_nodes = self.coeff_at_nodes * self.V_at_nodes * self.shortRangeDenom
+        self.JV_at_nodes = self.coeff_at_nodes * self.V_at_nodes * self.hyperboloidal_denom
 
         
 
@@ -149,7 +152,7 @@ class DG1DSolver:
     def compute_H(self) -> npt.NDArray[np.float64]:
         rho   = self.x_nodes
         H     = np.zeros_like(rho)
-        self.shortRangeDenom = np.ones_like(rho)   # (D, N+1), default 1 outside layer
+        self.hyperboloidal_denom = np.ones_like(rho)
         self.Omega = np.ones_like(rho)
         layer = rho > self.R
 
@@ -158,12 +161,12 @@ class DG1DSolver:
         Omega_prime  = -self.P * sigma**(self.P - 1) / (self.s - self.R)
         denom        = Omega - rho[layer] * Omega_prime
 
-        # analytic limit at σ=1
+        # Superstius forcing analytical limits near rho = s. Unneeded but no harm.
         near_scri        = sigma > (1.0 - 1e-12)
         denom[near_scri] = self.s * self.P / (self.s - self.R)
         Omega[near_scri] = 0.0
 
-        self.shortRangeDenom[layer] = denom
+        self.hyperboloidal_denom[layer] = denom
         self.Omega[layer] = Omega
         H[layer] = 1.0 - Omega**2 / denom
         return H
@@ -204,8 +207,10 @@ class DG1DSolver:
         ],
     ) -> None:
         """
-        Project initial conditions onto the DG basis.
-        Since Phi_q = I the DG coefficients are just the nodal values.
+        Initialize the DG solution from nodal data.
+
+        Because the basis is nodal at the GLL points, the DG coefficients are
+        identical to the nodal values and no projection solve is required.
 
         Parameters
         ----------
@@ -226,7 +231,7 @@ class DG1DSolver:
 
     def rhs(self, u: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
         """
-        Compute du/dτ for the hyperboloidal wave system.
+        Compute du/dt for the hyperboloidal wave system.
 
         Parameters
         ----------
@@ -240,11 +245,11 @@ class DG1DSolver:
         q = u[:, :, 1]
         p = u[:, :, 2]
 
-        # ---- volume terms ----------------------------------------
+        # Volume Differentiation
         vol_p = np.einsum('i,ei,ij->ej', self.quad_weights, p, self.D_Phi)
         vol_q = np.einsum('i,ei,ij->ej', self.quad_weights, q, self.D_Phi)
 
-        # ---- interface values ------------------------------------
+        # Interface Values
         p_minus_L = p[self.left_neighbors,  -1]
         q_minus_L = q[self.left_neighbors,  -1]
         p_plus_R  = p[self.right_neighbors,  0]
@@ -262,27 +267,26 @@ class DG1DSolver:
         p_minus_L[0] = -p_plus_L[0]
         q_minus_L[0] = -q_plus_L[0]
 
-        # ---- upwind fluxes ---------------------------------------
+        # Upwind Fluxes
         hat_q_L = 0.5 * (q_minus_L + q_plus_L) + 0.5 * (p_minus_L - p_plus_L)
         hat_q_R = 0.5 * (q_minus_R + q_plus_R) + 0.5 * (p_minus_R - p_plus_R)
         hat_p_L = 0.5 * (p_minus_L + p_plus_L) + 0.5 * (q_minus_L - q_plus_L)
         hat_p_R = 0.5 * (p_minus_R + p_plus_R) + 0.5 * (q_minus_R - q_plus_R)
 
-        # ---- boundary flux vectors -------------------------------
+        # Boundary Flux Vectors
         self.b_p[:, 0]  = -hat_p_L;  self.b_p[:, -1] = hat_p_R
         self.b_q[:, 0]  = -hat_q_L;  self.b_q[:, -1] = hat_q_R
 
-        # ---- DG spatial derivatives ------------------------------
+        # DG Differentiation
         scale = self.inv_w / self.h[:, None]
         dp = (self.b_p - vol_p) * scale
         dq = (self.b_q - vol_q) * scale
 
-        # ---- hyperboloidal coupling ------------------------------
+        # Hyperboloidal coupling
         H     = self.H_at_nodes
         coeff = self.coeff_at_nodes       # 1/(1+H), finite at ρ=s
-        JVU   = self.JV_at_nodes * U      # J*V*U, precomputed to avoid 0/0
+        JVU   = self.JV_at_nodes * U      # J*V precomputed to avoid 0/0
 
-        # ---- assemble --------------------------------------------
         dudt = np.zeros_like(u)
         dudt[:, :, 0] = -p
         dudt[:, :, 1] = coeff * (-dp - H * dq) + H * JVU
@@ -295,7 +299,12 @@ class DG1DSolver:
     # ------------------------------------------------------------------
 
     def compute_dt(self, cfl: float) -> float:
-        """CFL timestep for unit wave speed."""
+        """
+        Return the timestep used by RK4.
+
+        Currently fixed to 1e-3 for convergence studies. The CFL-based
+        estimate is retained below for future use.
+        """
         #return float(cfl * np.min(self.h) / (2 * self.N + 1))
         return 0.001
 
@@ -311,8 +320,11 @@ class DG1DSolver:
         t  = 0.0
         dt = self.compute_dt(cfl)
         print(f"t = {t:.3f} | L2Norm = {self.compute_L2_norm():.6e} | E = {self.compute_energy():.6e}")
+
+        # Time solution plots if needed
         plot_times = []
         plot_idx = 0
+
         while t < T:
             dt = min(dt, T - t)
             self.step_rk4(dt)
@@ -436,7 +448,7 @@ class DG1DSolver:
         #plt.show()
         plt.close()
     
-    def plot_scri_waveform(self, x0: float = 10.0, filename : str = "WHATNONAMEGIVEN") -> None:
+    def plot_scri_waveform(self, x0: float = 10.0, filename : str = "Scri_WaveForm_L2Error.png") -> None:
         """
         Plot the extracted waveform at ρ=s against the exact solution.
         """
@@ -446,7 +458,7 @@ class DG1DSolver:
         t      = data[:, 0]
         U_scri = data[:, 1]
 
-        U_exact = exact_solution(self.s, t, x0)
+        U_exact = exact_solution_at_rho(self.s, t, x0, self.Omega[-1, -1])
 
         fig, axes = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
 
@@ -496,12 +508,17 @@ class DG1DSolver:
             header="t u_scri q_scri p_scri u_in u_mid u_scri_exact",
             comments="",
         )
-
 def exact_solution(x: npt.NDArray, t: npt.NDArray, x0: float = 10.0) -> npt.NDArray:
     """
-    Exact solution for V = 6/r² with outgoing wave initial data.
-    ψ(t,r) = f''(t-r) + (3/r)*f'(t-r) + (3/r²)*f(t-r)
-    At ρ=s (r→∞) only f'' survives.
+    Exact outgoing solution of
+
+        - U_tt + U_rr - 6/r² U = 0
+
+    generated by the profile
+
+        f(u) = sin(u) exp(-u²),
+
+    where u = t - r + x0.
     """
     u = t - x + x0   # retarded time argument, note sign: t - r not r - t
 
@@ -513,14 +530,20 @@ def exact_solution(x: npt.NDArray, t: npt.NDArray, x0: float = 10.0) -> npt.NDAr
 
 def exact_solution_at_rho(rho: npt.NDArray, tau: npt.NDArray, x0: float, Omega: npt.NDArray) -> npt.NDArray:
     """
-    Exact solution at a point inside the hyperboloidal layer.
-    Converts (τ, ρ) → (t, r) before evaluating the (t,r) exact solution.
-    
-    r   = ρ / Ω(ρ)
-    t   = τ + h(ρ)   where h(ρ) = ρ - r* = ρ - r (flat space)
-    t-r = τ - ρ      (the outgoing characteristic is preserved)
+    Evaluate the exact l=2 outgoing solution in hyperboloidal coordinates.
+
+    Using
+
+        r = rho / Ω(rho),
+
+    and the flat-space hyperboloidal transformation,
+
+        t - r = τ - rho,
+
+    the exact solution can be evaluated directly as a function of
+    (τ,ρ) without explicitly constructing t or r.
     """
-    u   = tau - rho + x0                 # retarded time: τ-ρ = t-r in flat space
+    u   = tau - rho + x0
 
     f1   =  np.sin(u) * np.exp(-u**2)
     fp1  =  (np.cos(u) - 2*u*np.sin(u)) * np.exp(-u**2)
@@ -532,12 +555,16 @@ def initial_state(
     x: npt.NDArray[np.float64],
 ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]]:
     """
-    Right-moving Gaussian initial data.
+    Initial data obtained from the exact outgoing l=2 solution.
 
-    Returns (f, fx, g) where
-        f= U(x, 0)
-        fx= dU/dx(x, 0)
-        g= p(x, 0) = -dU/dt(x, 0)
+    Returns
+    -------
+    f  : U(x,0)
+    fx : ∂U/∂x(x,0)
+    g  : -∂U/∂t(x,0)
+
+    Spatial and temporal derivatives are evaluated using fourth-order
+    finite differences applied to the exact solution.
     """
 
     u = -x + 10.0
@@ -567,7 +594,7 @@ def initial_state(
 
 def effective_potential(x: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
     """
-    Effective potential V(x).  Enters as -V(x)*U in dp/dt.
-    Return zeros for the free wave equation.
+    Effective potential for l=2 flat space wave equation. 
+        V(r) = 6/r^2
     """
     return 6.0/x**2

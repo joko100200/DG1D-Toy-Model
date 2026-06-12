@@ -14,6 +14,9 @@ import DG1DSolver
 # -------------------------
 
 class Tee:
+    """
+    Used to log print out data to store and review.
+    """
     def __init__(self, filepath, mode="w"):
         self.file   = open(filepath, mode)
         self.stdout = sys.stdout
@@ -42,7 +45,7 @@ R           = 30.0
 P           = 4
 T           = 60.0
 cfl         = 0.001
-D_values    = [20, 40, 80, 160, 320]
+D           = 160
 
 # -------------------------
 # OUTPUT DIRECTORIES
@@ -52,7 +55,8 @@ os.makedirs("logs",   exist_ok=True)
 os.makedirs("graphs", exist_ok=True)
 os.makedirs("probes", exist_ok=True)
 
-run_tag   = f"N{N}_T{T}_cfl{cfl}_Dmax{max(D_values)}"
+
+run_tag   = f"N{N}_T{T}_cfl{cfl}_D{D}_P{P}"
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 log_file  = f"logs/convergence_{run_tag}_{timestamp}.txt"
 
@@ -66,13 +70,14 @@ print("================================")
 print("DG CONVERGENCE RUN")
 print("================================")
 print(f"N = {N}")
-print(f"D values = {D_values}")
+print(f"D = {D}")
 print(f"T = {T}")
 print(f"CFL = {cfl}")
 print(f"Domain = [{left_bound}, {right_bound}]")
+print(f"R = {R}, P = {P}")
 
 src            = inspect.getsource(DG1DSolver.initial_state)
-keep_keywords  = ["f =", "fx =", "g ="]
+keep_keywords  = ["f ="]
 filtered_lines = [l for l in src.splitlines() if any(k in l for k in keep_keywords)]
 print("\n".join(filtered_lines))
 
@@ -83,6 +88,7 @@ print("\n".join(filtered_lines))
 
 hs     = []
 errors = []
+D_values    = [20, 40, 80, 160, 320]
 
 for Dp in D_values:
     probe_path = f"probes/h_refinement{Dp}{run_tag}.csv"
@@ -90,12 +96,12 @@ for Dp in D_values:
     h          = (right_bound - left_bound) / Dp
 
     if os.path.isfile(probe_path):
+        print(f"\n{'='*30}")
+        print(f"Probe '{probe_path}' found. Loading...")
+        print(f"\n{'='*30}")
         solver = DG1DSolver.DG1DSolver(x_grid, N, L, R, P, probe_path)
         coarse_probe = np.loadtxt(probe_path, delimiter=" ", skiprows=1)
         solver._probe_buffer = coarse_probe.tolist()
-        err = solver.L2_error_probe_state_diff()
-        print(f"L2 Error for D={Dp} compared to exact: {err}")
-
     else:
         print(f"\n{'='*30}")
         print(f"Running D = {Dp}, N = {N}")
@@ -104,11 +110,9 @@ for Dp in D_values:
         solver = DG1DSolver.DG1DSolver(x_grid, N, L, R, P, probe_path)
         solver.initialize_solution(DG1DSolver.initial_state)
         solver.run(T, cfl)
-        solver.plot_scri_waveform(10.0, f"graphs/scri{Dp}{run_tag}.png")
 
-        err = solver.L2_error_probe_state_diff()
-
-        print(f"L2 Error for D={Dp} compared to exact: {err}")
+    err = solver.L2_error_probe_state_diff()
+    print(f"L2 Error for D={Dp} compared to exact: {err}")
 
     errors.append(err)
     hs.append(h)
@@ -128,13 +132,13 @@ orders_mid  = np.log(errors[:-1, 2] / errors[1:, 2]) / np.log(2)
 print("\n==============================")
 print("Observed convergence rates")
 print("==============================")
-print("Scri!")
+print("Scri")
 for i, p in enumerate(orders_scri):
     print(f"D={D_values[i]:4d} -> {D_values[i+1]:4d} : p ≈ {p:.3f}")
-print("Second to last point!")
+print("Second-to-last")
 for i, p in enumerate(orders_in):
     print(f"D={D_values[i]:4d} -> {D_values[i+1]:4d} : p ≈ {p:.3f}")
-print("Middle point!")
+print("Mid")
 for i, p in enumerate(orders_mid):
     print(f"D={D_values[i]:4d} -> {D_values[i+1]:4d} : p ≈ {p:.3f}")
 
@@ -167,31 +171,33 @@ print("\n==============================")
 print("P-refinement study (fixed D)")
 print("==============================")
 
-D_fixed  = 160
 N_values = [2, 3, 4, 5, 6]
-x_grid   = np.linspace(left_bound, right_bound, D_fixed + 1)
+x_grid   = np.linspace(left_bound, right_bound, D + 1)
 
 p_errors = []
 
 for Np in N_values:
-    print(f"\n------------------------------")
-    print(f"Running D = {D_fixed}, N = {Np}")
-    print(f"------------------------------")
 
-    probe_path = f"probes/p_refinement_N{Np}.csv"
+    probe_path = f"probes/p_refinement_N{Np}{run_tag}.csv"
 
     if os.path.isfile(probe_path):
+        print(f"\n{'='*30}")
+        print(f"Probe '{probe_path}' found. Loading...")
+        print(f"\n{'='*30}")
         solver = DG1DSolver.DG1DSolver(x_grid, Np, L, R, P, probe_path)
         coarse_probe = np.loadtxt(probe_path, delimiter=" ", skiprows=1)
         solver._probe_buffer = coarse_probe.tolist()
     else:
+        print(f"\n{'='*30}")
+        print(f"Running D = {D}, N = {Np}")
+        print(f"\n{'='*30}")
         solver = DG1DSolver.DG1DSolver(x_grid, Np, L, R, P, probe_path)
         solver.initialize_solution(DG1DSolver.initial_state)
         solver.run(T, cfl)
     
     err = solver.L2_error_probe_state_diff()
     print(f"L2 Error for N={Np} compared to exact: {err}")
-    p_errors.append(err[0])   # use scri error for p-refinement
+    p_errors.append(err)   # use scri error for p-refinement
 
 
 # -------------------------
@@ -201,21 +207,37 @@ for Np in N_values:
 print("\n==============================")
 print("P-refinement exponential rates")
 print("==============================")
+p_errors = np.array(p_errors)   # (num_D, 3)
 
+print("Scri")
 for i in range(len(N_values) - 1):
-    alpha = np.log(p_errors[i] / p_errors[i+1]) / (N_values[i+1] - N_values[i])
-    print(f"N={N_values[i]} -> {N_values[i+1]} : alpha ≈ {alpha:.6f}")
+    alpha1 = np.log(p_errors[i, 0] / p_errors[i+1, 0]) / (N_values[i+1] - N_values[i])
+    print(f"N={N_values[i]} -> {N_values[i+1]} : alpha ≈ {alpha1:.6f}")
+print("Second-to-last")
+for i in range(len(N_values) - 1):
+    alpha2 = np.log(p_errors[i, 1] / p_errors[i+1, 1]) / (N_values[i+1] - N_values[i])
+    print(f"N={N_values[i]} -> {N_values[i+1]} : alpha ≈ {alpha2:.6f}")
+print("Mid")
+for i in range(len(N_values) - 1):
+    alpha3 = np.log(p_errors[i, 2] / p_errors[i+1, 2]) / (N_values[i+1] - N_values[i])
+    print(f"N={N_values[i]} -> {N_values[i+1]} : alpha ≈ {alpha3:.6f}")
+
 
 
 # -------------------------
 # P-REFINEMENT PLOT
 # -------------------------
 
+graph_base = f"graphs/convergence_{run_tag}_{timestamp}"
+
+labels = ["Scri", "Second-to-last", "Mid"]
 fig, ax = plt.subplots()
-ax.semilogy(N_values, p_errors, marker='o')
+for i, label in enumerate(labels):
+    ax.semilogy(N_values, p_errors[:, i], marker='o', label=label)
 ax.set_xlabel("Polynomial degree N")
-ax.set_ylabel("Relative L2 error (scri)")
-ax.set_title(f"p-refinement convergence (D={D_fixed})")
+ax.set_ylabel("Relative L2 error")
+ax.set_title(f"p-refinement convergence (D={D})")
+ax.legend()
 ax.grid(True, which="both")
 fig.savefig(f"{graph_base}_p_refinement.png", dpi=300)
 plt.show()
