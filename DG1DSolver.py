@@ -6,60 +6,73 @@ from collections.abc import Callable
 
 class DG1DSolver:
     """
-    Discontinuous Galerkin solver for the 1D wave equation.
+    Discontinuous Galerkin solver for the 1D wave equation with hyperboloidal compactification.
 
-    Solves the first-order system:
-        d/dt U = p
-        d/dt q = d/dx p       (q = d/dx U)
-        d/dt p = d/dx q - V(x)*U
+    Solves the first-order system in hyperboloidal coordinates (τ, ρ):
+        dU/dτ = -p
+        dq/dτ = coeff * (-dq_spatial - H * dp_spatial) - H * J*V*U
+        dp/dτ = coeff * (-dp_spatial - H * dq_spatial) - J*V*U
 
-    State is stored as u of shape (D, N+1, 3) where:
-        u[:, :, 0] = U  (displacement)
-        u[:, :, 1] = q  (spatial derivative of U)
-        u[:, :, 2] = p  (time derivative of U)
+    where coeff = 1/(1+H), J*V is precomputed to avoid 0/0 at ρ=s,
+    and H=0 outside the hyperboloidal layer so the standard wave equation
+    is recovered there.
 
-    Since GLL nodes + Lagrange basis give Phi_q = I:
-        M   = diag(quad_weights)
-        M^-1 = diag(1/quad_weights)
+    State shape: u (D, N+1, 3)
+        u[:, :, 0] = U   displacement
+        u[:, :, 1] = q   spatial derivative of U
+        u[:, :, 2] = p   time derivative of U  (p = -∂_τ U)
+
+    GLL nodes + Lagrange basis give Phi_q = I, so:
+        M     = diag(quad_weights)
+        M^-1  = diag(1/quad_weights)
     All mass matrix operations reduce to elementwise division by quad_weights.
-    The projection of any function onto the basis is just its nodal values.
     """
 
-    def __init__(self, x_grid: npt.NDArray[np.float64], N: int, L: int, R: float, P: int, outputfileDir: str):
+    def __init__(
+        self,
+        x_grid: npt.NDArray[np.float64],
+        N: int,
+        L: int,
+        R: float,
+        P: int,
+        outputfileDir: str,
+    ):
         self.D = len(x_grid) - 1
         self.N = N
         self.L = L
 
         self.x = x_grid
-        self.h = (self.x[1:] - self.x[:-1]) / 2.0          # shape (D,)
+        self.h = (self.x[1:] - self.x[:-1]) / 2.0   # half-element widths, shape (D,)
 
-        self.R = R
+        self.left_neighbors  = np.roll(np.arange(self.D),  1)
+        self.right_neighbors = np.roll(np.arange(self.D), -1)
+
+        self.b_p = np.zeros((self.D, self.N + 1))
+        self.b_q = np.zeros((self.D, self.N + 1))
+
+        self.R = self.x[np.argmin(np.abs(self.x - R))]   # snap R to nearest grid interface
         self.P = P
+        self.s = self.x[-1]                               # future null infinity ρ = s
 
-        self.s = self.x[-1]   # right boundary of physical domain
+        self.xi_nodes     = self.gauss_lobatto_nodes()
+        self.quad_weights = self.gauss_lobatto_weights()  # shape (N+1,)
+        self.inv_w        = 1.0 / self.quad_weights       # shape (N+1,)
 
-        self.xi_nodes    = self.gauss_lobatto_nodes()
-        self.quad_weights = self.gauss_lobatto_weights()     # shape (N+1,)
-        self.inv_w       = 1.0 / self.quad_weights           # shape (N+1,)
-
-        self.lagrange_basis_matrix()   # builds Phi_plot only — Phi_q = I
+        self.lagrange_basis_matrix()
         self.calculate_D_Phi()
 
-        self.init_probe_logger(outputfileDir) #File to save waveform output
+        self.init_probe_logger(outputfileDir)
 
-        self.x_nodes     = self.reconstruct_x_at_nodes()    # shape (D, N+1)
-        self.V_at_nodes  = effective_potential(self.x_nodes) # shape (D, N+1)
+        self.x_nodes    = self.reconstruct_x_at_nodes()    # (D, N+1)
 
-        self.H_at_nodes  = self.compute_H()                # shape (D, N+1)
+        self.V_at_nodes = effective_potential(self.x_nodes) # (D, N+1)
+        self.H_at_nodes = self.compute_H()                  # (D, N+1)
+        self.coeff_at_nodes = 1.0 / (1.0 + self.H_at_nodes)   # (D, N+1), = 1/2 at ρ=s
+        
+        # J*V precomputed analytically to avoid 0/0 at ρ=s where H→1
+        self.JV_at_nodes = self.coeff_at_nodes * self.V_at_nodes * self.shortRangeDenom
 
-        denom          = 1.0 - self.H_at_nodes**2
-        safe           = denom > 1e-14
-        limit_at_scri  = 0.0   # compute V(r)*r² / (dΩ²/dρ evaluated at s) analytically
-
-        self.JV_at_nodes = np.where(safe, self.V_at_nodes / np.where(safe, denom, 1.0), limit_at_scri) #(D, N+1)
-        self.coeff_at_nodes = 1.0 / (1.0 + self.H_at_nodes)    # (D, N+1)
-
-        self.u_fine = np.zeros_like(self.x_nodes)
+        
 
     # ------------------------------------------------------------------
     # Basis and quadrature
@@ -68,49 +81,48 @@ class DG1DSolver:
     def gauss_lobatto_nodes(self) -> npt.NDArray[np.float64]:
         if self.N == 1:
             return np.array([-1.0, 1.0], dtype=np.float64)
-        P  = Legendre.basis(self.N)
-        dP = P.deriv()
-        interior = dP.roots()
+        P       = Legendre.basis(self.N)
+        interior = P.deriv().roots()
         return np.concatenate(([-1.0], np.sort(interior), [1.0]), dtype=np.float64)
 
     def gauss_lobatto_weights(self) -> npt.NDArray[np.float64]:
-        N     = self.N
-        nodes = self.gauss_lobatto_nodes()
-        if N == 1:
+        if self.N == 1:
             return np.array([1.0, 1.0], dtype=np.float64)
-        Pn      = Legendre.basis(N)
-        weights = np.zeros(N + 1, dtype=np.float64)
-        for i, x in enumerate(nodes):
-            weights[i] = 2.0 / (N * (N + 1)) / (Pn(x) ** 2)
+        nodes   = self.gauss_lobatto_nodes()
+        Pn      = Legendre.basis(self.N)
+        weights = np.array(
+            [2.0 / (self.N * (self.N + 1)) / (Pn(x) ** 2) for x in nodes],
+            dtype=np.float64,
+        )
         return weights
 
-    def lagrange_basis_matrix(self):
+    def lagrange_basis_matrix(self) -> None:
         """
-        Build Phi_plot only — the dense evaluation grid for plotting.
-        Phi_q = I by the Kronecker delta property so we don't store it.
+        Build Phi_plot for dense plotting.  Phi_q = I by the Kronecker delta
+        property of Lagrange basis at GLL nodes so it is never stored.
 
         Stores
         ------
-        Phi_plot : (N+1, L)   Phi_plot[j, k] = phi_j(epsilon_k)
-        grid_points : (L,)    dense reference grid
+        Phi_plot  : (N+1, L)
+        grid_points : (L,)   reference interval dense grid
         """
         self.grid_points = np.linspace(-1.0, 1.0, self.L, dtype=np.float64)
         Phi_plot = np.zeros((self.N + 1, self.L))
-
         for j in range(self.N + 1):
-            lj_p = np.ones(self.L)
-            xj   = self.xi_nodes[j]
+            lj = np.ones(self.L)
+            xj = self.xi_nodes[j]
             for m, xm in enumerate(self.xi_nodes):
                 if m != j:
-                    lj_p *= (self.grid_points - xm) / (xj - xm)
-            Phi_plot[j, :] = lj_p
-
+                    lj *= (self.grid_points - xm) / (xj - xm)
+            Phi_plot[j] = lj
         self.Phi_plot = Phi_plot
 
-    def calculate_D_Phi(self):
+    def calculate_D_Phi(self) -> None:
         """
-        Derivative matrix via barycentric weights.
-        D_Phi[i, j] = phi_j'(xi_i)   shape (N+1, N+1)
+        Differentiation matrix via barycentric weights.
+        D_Phi[i, j] = phi_j'(xi_i),  shape (N+1, N+1).
+        Endpoint diagonals are set to their exact analytic values to avoid
+        floating-point accumulation error.
         """
         Np  = self.N + 1
         x   = self.xi_nodes
@@ -120,32 +132,40 @@ class DG1DSolver:
                 if m != j:
                     lam[j] /= (x[j] - x[m])
 
-        D_Phi = np.zeros((Np, Np), dtype=np.float64)
+        D = np.zeros((Np, Np), dtype=np.float64)
         for i in range(Np):
             for j in range(Np):
                 if i != j:
-                    D_Phi[i, j] = lam[j] / lam[i] / (x[i] - x[j])
+                    D[i, j] = lam[j] / lam[i] / (x[i] - x[j])
         for i in range(Np):
-            D_Phi[i, i] = -np.sum(D_Phi[i])
-        self.D_Phi = D_Phi
-    
+            D[i, i] = -np.sum(D[i])
+
+        # exact endpoint values (standard LGL identity)
+        D[0,  0 ] = -self.N * (self.N + 1) / 4.0
+        D[-1, -1] =  self.N * (self.N + 1) / 4.0
+
+        self.D_Phi = D
+
     def compute_H(self) -> npt.NDArray[np.float64]:
-        """
-        Compute H(rho) from the hyperboloidal layer definition (Scott et al. Eq. 19, 21).
-        H = 0 for rho ≤ R (outside the layer).
-        """
-        rho   = self.x_nodes          # (D, N+1), your computational coordinate
-        rho_R = self.x[np.argmin(np.abs(self.x - self.R))] #closes interface
-        layer = rho > rho_R          # mask for interior of layer
-
+        rho   = self.x_nodes
         H     = np.zeros_like(rho)
+        self.shortRangeDenom = np.ones_like(rho)   # (D, N+1), default 1 outside layer
+        self.Omega = np.ones_like(rho)
+        layer = rho > self.R
 
-        sigma      = (rho[layer] - self.R) / (self.s - self.R)
-        Omega      = 1.0 - sigma**self.P
-        Omega_prime = -self.P * sigma**(self.P - 1) / (self.s - self.R)
+        sigma        = np.clip((rho[layer] - self.R) / (self.s - self.R), 0.0, 1.0)
+        Omega        = 1.0 - sigma**self.P
+        Omega_prime  = -self.P * sigma**(self.P - 1) / (self.s - self.R)
+        denom        = Omega - rho[layer] * Omega_prime
 
-        H[layer] = 1.0 - Omega**2 / (Omega - rho[layer] * Omega_prime)
+        # analytic limit at σ=1
+        near_scri        = sigma > (1.0 - 1e-12)
+        denom[near_scri] = self.s * self.P / (self.s - self.R)
+        Omega[near_scri] = 0.0
 
+        self.shortRangeDenom[layer] = denom
+        self.Omega[layer] = Omega
+        H[layer] = 1.0 - Omega**2 / denom
         return H
 
     # ------------------------------------------------------------------
@@ -153,21 +173,19 @@ class DG1DSolver:
     # ------------------------------------------------------------------
 
     def reconstruct_x(self) -> npt.NDArray[np.float64]:
-        """Physical coordinates on the dense grid. Shape (D, L)."""
-        x_grid = np.asarray(self.x, dtype=np.float64)
-        x_reconstructed = np.zeros((self.D, self.L), dtype=np.float64)
+        """Dense plotting grid coordinates. Shape (D, L)."""
+        x_nodes = np.zeros((self.D, self.L), dtype=np.float64)
         for j in range(self.D):
-            dx = x_grid[j + 1] - x_grid[j]
-            x_reconstructed[j, :] = x_grid[j] + 0.5 * dx * (self.grid_points + 1.0)
-        return x_reconstructed
+            dx = self.x[j + 1] - self.x[j]
+            x_nodes[j] = self.x[j] + 0.5 * dx * (self.grid_points + 1.0)
+        return x_nodes
 
     def reconstruct_x_at_nodes(self) -> npt.NDArray[np.float64]:
-        """Physical coordinates at GL nodes. Shape (D, N+1)."""
-        x_grid = np.asarray(self.x, dtype=np.float64)
+        """GLL node coordinates on the physical grid. Shape (D, N+1)."""
         x_nodes = np.zeros((self.D, self.N + 1), dtype=np.float64)
         for j in range(self.D):
-            dx = x_grid[j + 1] - x_grid[j]
-            x_nodes[j, :] = x_grid[j] + 0.5 * dx * (self.xi_nodes + 1.0)
+            dx = self.x[j + 1] - self.x[j]
+            x_nodes[j] = self.x[j] + 0.5 * dx * (self.xi_nodes + 1.0)
         return x_nodes
 
     # ------------------------------------------------------------------
@@ -178,36 +196,29 @@ class DG1DSolver:
         self,
         init_fn: Callable[
             [npt.NDArray[np.float64]],
-            tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]]
-        ]
+            tuple[
+                npt.NDArray[np.float64],
+                npt.NDArray[np.float64],
+                npt.NDArray[np.float64],
+            ],
+        ],
     ) -> None:
         """
         Project initial conditions onto the DG basis.
-
-        Since Phi_q = I, the DG coefficients are just the nodal values.
-        No mass matrix solve needed.
+        Since Phi_q = I the DG coefficients are just the nodal values.
 
         Parameters
         ----------
-        init_fn : callable
-            Function of x returning (f, fx, g) where
-                f  = U(x, 0)
-                fx = dU/dx(x, 0)
-                g  = dU/dt(x, 0)
-
-        Stores
-        ------
-        self.u : (D, N+1, 3)
-            u[:, :, 0] = U
-            u[:, :, 1] = q = dU/dx
-            u[:, :, 2] = p = dU/dt
+        init_fn : x -> (f, fx, g)
+            f  = U(x, 0)
+            fx = dU/dx(x, 0)
+            g  = p(x, 0) = -dU/dt(x, 0)
         """
-        f_vals, fx_vals, g_vals = init_fn(self.x_nodes)
-
+        f, fx, g = init_fn(self.x_nodes)
         self.u = np.zeros((self.D, self.N + 1, 3), dtype=np.float64)
-        self.u[:, :, 0] = f_vals
-        self.u[:, :, 1] = fx_vals
-        self.u[:, :, 2] = g_vals
+        self.u[:, :, 0] = f
+        self.u[:, :, 1] = fx
+        self.u[:, :, 2] = g
 
     # ------------------------------------------------------------------
     # RHS
@@ -215,13 +226,7 @@ class DG1DSolver:
 
     def rhs(self, u: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
         """
-        RHS for the system:
-            dU/dt = -p
-            dq/dt = -d/dx p          (q = dU/dx)
-            dp/dt = -d/dx q - V(x)*U
-
-        Since M = diag(w) and inv_M = diag(1/w):
-            inv_M @ (vol - b) becomes (vol - b) * inv_w  elementwise.
+        Compute du/dτ for the hyperboloidal wave system.
 
         Parameters
         ----------
@@ -231,67 +236,57 @@ class DG1DSolver:
         -------
         dudt : (D, N+1, 3)
         """
-        U = u[:, :, 0]   # (D, N+1)
-        q = u[:, :, 1]   # (D, N+1)
-        p = u[:, :, 2]   # (D, N+1)
+        U = u[:, :, 0]
+        q = u[:, :, 1]
+        p = u[:, :, 2]
 
         # ---- volume terms ----------------------------------------
-        # vol[e, k] = sum_m w_m * f_m * D_Phi[m, k]
-        vol_p = (self.quad_weights * q) @ self.D_Phi   # driven by q
-        vol_q = (self.quad_weights * p) @ self.D_Phi   # driven by p
-        #vol_p = np.einsum('i,ei,ij->ej', self.quad_weights, q, self.D_Phi)
-        #vol_q = np.einsum('i,ei,ij->ej', self.quad_weights, p, self.D_Phi)
+        vol_p = np.einsum('i,ei,ij->ej', self.quad_weights, p, self.D_Phi)
+        vol_q = np.einsum('i,ei,ij->ej', self.quad_weights, q, self.D_Phi)
 
-        # ---- interface values -------------------------
-        p_minus_L = np.roll(p[:, -1],  1)
+        # ---- interface values ------------------------------------
+        p_minus_L = p[self.left_neighbors,  -1]
+        q_minus_L = q[self.left_neighbors,  -1]
+        p_plus_R  = p[self.right_neighbors,  0]
+        q_plus_R  = q[self.right_neighbors,  0]
         p_plus_L  = p[:, 0]
         p_minus_R = p[:, -1]
-        p_plus_R  = np.roll(p[:, 0], -1)
-
-        q_minus_L = np.roll(q[:, -1],  1)
         q_plus_L  = q[:, 0]
         q_minus_R = q[:, -1]
-        q_plus_R  = np.roll(q[:, 0], -1)
 
-        # global right boundary (ρ = s): outflow, no incoming state
+        # global right boundary: outflow (no incoming state)
         p_plus_R[-1] = p_minus_R[-1]
         q_plus_R[-1] = q_minus_R[-1]
 
-        # global left boundary: reflecting (zero flux into domain)
+        # global left boundary: reflecting
         p_minus_L[0] = -p_plus_L[0]
         q_minus_L[0] = -q_plus_L[0]
 
         # ---- upwind fluxes ---------------------------------------
-        hat_q_L = 0.5*(q_minus_L + q_plus_L) + 0.5*(p_minus_L - p_plus_L)
-        hat_q_R = 0.5*(q_minus_R + q_plus_R) + 0.5*(p_minus_R - p_plus_R)
+        hat_q_L = 0.5 * (q_minus_L + q_plus_L) + 0.5 * (p_minus_L - p_plus_L)
+        hat_q_R = 0.5 * (q_minus_R + q_plus_R) + 0.5 * (p_minus_R - p_plus_R)
+        hat_p_L = 0.5 * (p_minus_L + p_plus_L) + 0.5 * (q_minus_L - q_plus_L)
+        hat_p_R = 0.5 * (p_minus_R + p_plus_R) + 0.5 * (q_minus_R - q_plus_R)
 
-        hat_p_L = 0.5*(p_minus_L + p_plus_L) + 0.5*(q_minus_L - q_plus_L)
-        hat_p_R = 0.5*(p_minus_R + p_plus_R) + 0.5*(q_minus_R - q_plus_R)
+        # ---- boundary flux vectors -------------------------------
+        self.b_p[:, 0]  = -hat_p_L;  self.b_p[:, -1] = hat_p_R
+        self.b_q[:, 0]  = -hat_q_L;  self.b_q[:, -1] = hat_q_R
 
-        # ---- boundary vectors ------------------------------------
-        # p equation uses hat_q; q equation uses hat_p
-        b_p = np.zeros_like(p)
-        b_q = np.zeros_like(q)
-        b_p[:, 0]  = -hat_q_L;  b_p[:, -1] = hat_q_R
-        b_q[:, 0]  = -hat_p_L;  b_q[:, -1] = hat_p_R
+        # ---- DG spatial derivatives ------------------------------
+        scale = self.inv_w / self.h[:, None]
+        dp = (self.b_p - vol_p) * scale
+        dq = (self.b_q - vol_q) * scale
 
-        # ---- source term -V(x)*U in dp/dt -----------------------
-        potentialVU = self.JV_at_nodes * U   # (D, N+1), no mass matrix needed
-
-        # ---- hyperboloidal terms ---------------------------------
-        H = self.H_at_nodes
-        coeff = self.coeff_at_nodes
+        # ---- hyperboloidal coupling ------------------------------
+        H     = self.H_at_nodes
+        coeff = self.coeff_at_nodes       # 1/(1+H), finite at ρ=s
+        JVU   = self.JV_at_nodes * U      # J*V*U, precomputed to avoid 0/0
 
         # ---- assemble --------------------------------------------
-        # inv_M @ v = v * inv_w  (M is diagonal)
-        # sign: (b - vol) from weak form derivation
-        dp = ((b_p - vol_p) * self.inv_w) / self.h[:, None]
-        dq = ((b_q - vol_q) * self.inv_w) / self.h[:, None]
-
         dudt = np.zeros_like(u)
         dudt[:, :, 0] = -p
-        dudt[:, :, 1] = coeff * (-dq - H * dp) - H * potentialVU
-        dudt[:, :, 2] = coeff * (-dp - H * dq) - potentialVU
+        dudt[:, :, 1] = coeff * (-dp - H * dq) + H * JVU
+        dudt[:, :, 2] = coeff * (-dq - H * dp) + JVU
 
         return dudt
 
@@ -301,7 +296,8 @@ class DG1DSolver:
 
     def compute_dt(self, cfl: float) -> float:
         """CFL timestep for unit wave speed."""
-        return float(cfl * np.min(self.h) / (2 * self.N + 1))
+        #return float(cfl * np.min(self.h) / (2 * self.N + 1))
+        return 0.001
 
     def step_rk4(self, dt: float) -> None:
         u0 = self.u.copy()
@@ -309,230 +305,269 @@ class DG1DSolver:
         k2 = self.rhs(u0 + 0.5 * dt * k1)
         k3 = self.rhs(u0 + 0.5 * dt * k2)
         k4 = self.rhs(u0 + dt * k3)
-        self.u = u0 + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
+        self.u = u0 + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
 
     def run(self, T: float, cfl: float = 0.5) -> npt.NDArray[np.float64]:
         t  = 0.0
         dt = self.compute_dt(cfl)
-        print(f"t = 0.0 | L2 = {self.L2_error_self(self.u_fine):.6e} | E = {self.compute_energy():.6e}")
+        print(f"t = {t:.3f} | L2Norm = {self.compute_L2_norm():.6e} | E = {self.compute_energy():.6e}")
+        plot_times = []
+        plot_idx = 0
         while t < T:
-            if t + dt > T:
-                dt = T - t
+            dt = min(dt, T - t)
             self.step_rk4(dt)
             t += dt
-        print(f"t = {T} | L2 = {self.L2_error_self(self.u_fine):.6e} | E = {self.compute_energy():.6e}")
-        return self.u
 
-    def runDEBUG(self, T: float, cfl: float = 0.5) -> npt.NDArray[np.float64]:
-        t   = 0.0
-        dt  = self.compute_dt(cfl)
+            while plot_idx < len(plot_times) and t >= plot_times[plot_idx]:
+                pt = plot_times[plot_idx]
+                self.plot_solution(t, f"graphs/{self.D}_WaveEquation_t{pt:.0f}.png")
+                plot_idx += 1
 
-        print(f"t = {t:.3f} | L2Norm = {self.compute_L2_norm()} | E = {self.compute_energy():.6e}")
-        while t < T:
-            if t + dt > T:
-                dt = T - t
-            self.step_rk4(dt)
-            #print(t, self.compute_L2_norm(), self.compute_energy(), self.energy_in_region(self.x[0], self.R), self.energy_in_region(self.R, self.x[-1]))
-            t += dt
+
             self.log_probe(t)
-        
+
         self.flush_probe()
-        
-        print(f"t = {t:.3f} | L2Norm = {self.compute_L2_norm()} | E = {self.compute_energy():.6e}")
+        print(f"t = {t:.3f} | L2Norm = {self.compute_L2_norm():.6e} | E = {self.compute_energy():.6e}")
         return self.u
 
     # ------------------------------------------------------------------
     # Diagnostics
     # ------------------------------------------------------------------
 
-    def L2_error_self(self, u_fine: npt.NDArray[np.float64]) -> float:
-        """
-        Self-convergence L2 error: compare self.u against a fine-grid solution
-        u_fine interpolated to the coarse nodes. Only valid when fine grid is
-        exactly 2x or 4x the coarse resolution so nodes are nested.
-        """
-        if not np.any(u_fine): return -1.0
-
-        diff = self.u - u_fine   # assumes same node layout, caller handles interpolation
-        err  = 0.0
-        for e in range(self.D):
-            err += np.sum(
-                self.quad_weights * (diff[e, :, 0]**2 +
-                                     diff[e, :, 1]**2 +
-                                     diff[e, :, 2]**2)
-            ) * self.h[e]
-        return np.sqrt(err)
-    
-    def L2_error_probe_state(self, u_fine : npt.NDArray[np.float64]) -> float:
-        """
-        L2 error between this solver's scri waveform and a reference (fine) waveform.
-        Both inputs are probe buffers: lists of (t, U, q, p) tuples.
-        Interpolates the fine solution onto the coarse time grid before differencing.
-        """
-        u_coarse = np.array(self._probe_buffer)   # (M_coarse, 4)
-
-        t_coarse = u_coarse[:, 0]
-        t_fine   = u_fine[:, 0]
-
-        # interpolate fine onto coarse time grid
-        U_fine_interp = np.interp(t_coarse, t_fine, u_fine[:, 1])
-        #q_fine_interp = np.interp(t_coarse, t_fine, u_fine[:, 2])
-        #p_fine_interp = np.interp(t_coarse, t_fine, u_fine[:, 3])
-
-        dU = u_coarse[:, 1] - U_fine_interp
-        #dq = u_coarse[:, 2] - q_fine_interp
-        #dp = u_coarse[:, 3] - p_fine_interp
-
-        return np.sqrt(np.trapz(dU**2, t_coarse))
-
-    @staticmethod 
-    def L2_error_probe_state_diff(u_coarse: npt.NDArray[np.float64], u_fine: npt.NDArray[np.float64]) -> float:
-        """
-        L2 error between this solver's scri waveform and a reference (fine) waveform.
-        Both inputs are probe buffers: lists of (t, U, q, p) tuples.
-        Interpolates the fine solution onto the coarse time grid before differencing.
-        """
-
-        t_coarse = u_coarse[:, 0]
-        t_fine   = u_fine[:, 0]
-
-        # interpolate fine onto coarse time grid
-        U_fine_interp = np.interp(t_coarse, t_fine, u_fine[:, 1])
-        #q_fine_interp = np.interp(t_coarse, t_fine, u_fine[:, 2])
-        #p_fine_interp = np.interp(t_coarse, t_fine, u_fine[:, 3])
-
-        dU = u_coarse[:, 1] - U_fine_interp
-        #dq = u_coarse[:, 2] - q_fine_interp
-        #dp = u_coarse[:, 3] - p_fine_interp
-
-        return np.sqrt(np.trapz(dU**2, t_coarse))
-        
-
-    def waveform_at_scri(self) -> tuple[float, float, float]:
-        """
-        Extract U, q, p at the last node of the last element (ρ = s).
-        This is your primary observable — the far-field waveform.
-        Returns (U, q, p) at scri+.
-        """
-        return (self.u[-1, -1, 0],
-                self.u[-1, -1, 1],
-                self.u[-1, -1, 2])
-
     def compute_energy(self) -> float:
-        """
-        E = 0.5 * integral (p^2 + q^2 + V*U^2) dx
-        Conserved by the wave system.
-        """
-        U   = self.u[:, :, 0]
-        q   = self.u[:, :, 1]
-        p   = self.u[:, :, 2]
-
-        integrand = (p**2 + q**2 + self.V_at_nodes * U**2)
-        return float(0.5 * np.sum(self.quad_weights * integrand * self.h[:, None]))
-
-    def energy_in_region(self, x_min: float, x_max: float) -> float:
+        """E = 0.5 * integral (p² + q² + V·U²) dρ"""
         U = self.u[:, :, 0]
         q = self.u[:, :, 1]
         p = self.u[:, :, 2]
+        integrand = p**2 + q**2 + self.V_at_nodes * U**2
+        return float(0.5 * np.sum(self.quad_weights * integrand * self.h[:, None]))
 
-        # element-wise mask (D, N+1)
-        x = self.x_nodes
-        mask = (x >= x_min) & (x <= x_max)
-
-        integrand = (p**2 + q**2 + self.V_at_nodes * U**2)
-
-        # apply mask
-        integrand = integrand * mask
-
-        # quadrature over reference element
-        local_energy = np.sum(self.quad_weights * integrand, axis=1)  # (D,)
-
-        # physical scaling
-        local_energy *= self.h
-
-        return 0.5 * np.sum(local_energy)
+    def energy_in_region(self, x_min: float, x_max: float) -> float:
+        """Energy integral restricted to [x_min, x_max]."""
+        U    = self.u[:, :, 0]
+        q    = self.u[:, :, 1]
+        p    = self.u[:, :, 2]
+        mask = (self.x_nodes >= x_min) & (self.x_nodes <= x_max)
+        integrand = (p**2 + q**2 + self.V_at_nodes * U**2) * mask
+        return float(0.5 * np.sum(self.quad_weights * integrand * self.h[:, None]))
 
     def compute_L2_norm(self) -> float:
-        """L2 norm of U with hyperboloidal volume element."""
-        U      = self.u[:, :, 0]
-        return np.sqrt(np.sum(self.quad_weights * U**2 * self.h[:, None]))
+        """L2 norm of U."""
+        U = self.u[:, :, 0]
+        return float(np.sqrt(np.sum(self.quad_weights * U**2 * self.h[:, None])))
 
-    def error_in_u0(self, init_fn) -> None:
+    def waveform_at_scri(self) -> tuple[float, float, float]:
+        """U, q, p at the last node of the last element (ρ = s)."""
+        return (self.u[-1, -1, 0], self.u[-1, -1, 1], self.u[-1, -1, 2])
+
+    def L2_error_probe_state_diff(self) -> tuple[float, float, float]:
+        """
+        Relative L2 errors at three probe locations compared to the exact solution.
+
+        Returns
+        -------
+        (E_scri, E_in, E_mid) : relative L2 norms at ρ=s, one node inward, domain midpoint.
+        """
+        data = np.asarray(self._probe_buffer)
+        t    = data[:, 0]
+
+        U_scri = data[:, 1]
+        U_in   = data[:, 4]
+        U_mid  = data[:, 5]
+
+        x_scri = self.x_nodes[-1, -1]
+        x_in   = self.x_nodes[-1, -2]
+        x_mid  = self.x_nodes[self.D // 2, 0]
+
+        U_exact_scri = exact_solution_at_rho(x_scri, t, 10.0, self.Omega[-1, -1])
+        U_exact_in   = exact_solution_at_rho(x_in, t, 10.0, self.Omega[-1, -2])
+        U_exact_mid  = exact_solution_at_rho(x_mid, t, 10.0, self.Omega[self.D // 2, 0])
+
+        def L2_time_error(u_num, u_ex):
+            num = np.trapz((u_num - u_ex)**2, t)
+            den = np.trapz(u_ex**2, t)
+
+            # avoid division blow-up in late-time tails
+            if den < 1e-14:
+                return np.nan
+
+            return np.sqrt(num / den)
+
+        E_scri = L2_time_error(U_scri, U_exact_scri)
+        E_in   = L2_time_error(U_in,   U_exact_in)
+        E_mid  = L2_time_error(U_mid,  U_exact_mid)
+
+        return E_scri, E_in, E_mid
+
+    def error_in_u0(self, init_fn: Callable) -> None:
         """Print projection error at t=0."""
-        f_exact, fx_exact, g_exact = init_fn(self.x_nodes)
-        U_h = self.u[:, :, 0]
-        q_h = self.u[:, :, 1]
-        p_h = self.u[:, :, 2]
-        print(f"Projection error U: {np.sqrt(np.mean((U_h - f_exact)**2)):.6e}")
-        print(f"Projection error q: {np.sqrt(np.mean((q_h - fx_exact)**2)):.6e}")
-        print(f"Projection error p: {np.sqrt(np.mean((p_h - g_exact)**2)):.6e}")
+        f, fx, g = init_fn(self.x_nodes)
+        print(f"Projection error U: {np.sqrt(np.mean((self.u[:,:,0] - f )**2)):.6e}")
+        print(f"Projection error q: {np.sqrt(np.mean((self.u[:,:,1] - fx)**2)):.6e}")
+        print(f"Projection error p: {np.sqrt(np.mean((self.u[:,:,2] - g )**2)):.6e}")
 
     def plot_solution(self, t: float, filename: str = "graphs/DG_wave_solution.png") -> None:
         import matplotlib.pyplot as plt
 
         x_dense = self.reconstruct_x().reshape(-1)
         U_dense = (self.u[:, :, 0] @ self.Phi_plot).reshape(-1)
+        U_exact_dense = exact_solution_at_rho(x_dense, np.asarray(t), 10.0, self.Omega)
+
         q_dense = (self.u[:, :, 1] @ self.Phi_plot).reshape(-1)
         p_dense = (self.u[:, :, 2] @ self.Phi_plot).reshape(-1)
 
-        domain_len = self.x[-1] - self.x[0]
-        x_plus  = ((x_dense + t - self.x[0]) % domain_len) + self.x[0]
-        x_minus = ((x_dense - t - self.x[0]) % domain_len) + self.x[0]
-        _, fx_plus,  g_plus  = initial_state(x_plus)
-        _, fx_minus, g_minus = initial_state(x_minus)
-        p_exact = 0.5 * (g_plus  + g_minus - fx_plus  + fx_minus)
-        q_exact = 0.5 * (g_plus  + g_minus - fx_plus  + fx_minus)
+        fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
 
-        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
-        ax1.plot(x_dense, p_dense, label='DG p')
-        ax1.plot(x_dense, p_exact, label='Exact p', linestyle='dashed')
-        ax1.set_ylabel('p');  ax1.legend();  ax1.grid()
-        ax2.plot(x_dense, q_dense, label='DG q')
-        ax2.plot(x_dense, q_exact, label='Exact q', linestyle='dashed')
-        ax2.set_ylabel('q');  ax2.legend();  ax2.grid()
-        ax3.plot(x_dense, U_dense, label='DG U')
-        ax3.set_xlabel('x');  ax3.set_ylabel('U');  ax3.legend();  ax3.grid()
-        plt.suptitle(f'Wave equation DG solution at t={t:.3f}')
+        axes[0].plot(x_dense, U_dense, label="DG U")
+        axes[0].plot(x_dense, U_exact_dense, label="Exact U", linestyle="dashed")
+        axes[0].set_ylabel("U")
+        axes[0].legend()
+        axes[0].grid()
+
+        for ax, y, label in zip(axes[1:], [q_dense, p_dense], ["q", "p"]):
+            ax.plot(x_dense, y, label=f"DG {label}")
+            ax.set_ylabel(label)
+            ax.legend()
+            ax.grid()
+        axes[-1].set_xlabel("x")
+        plt.suptitle(f"Wave equation DG solution at t={t:.3f}")
         plt.tight_layout()
         plt.savefig(filename, dpi=300)
-        plt.show()
+        #plt.show()
+        plt.close()
+    
+    def plot_scri_waveform(self, x0: float = 10.0, filename : str = "WHATNONAMEGIVEN") -> None:
+        """
+        Plot the extracted waveform at ρ=s against the exact solution.
+        """
+        import matplotlib.pyplot as plt
 
-    def init_probe_logger(self, filename: str = "probe.csv"):
-        self.probe_file = filename
+        data   = np.asarray(self._probe_buffer)
+        t      = data[:, 0]
+        U_scri = data[:, 1]
+
+        U_exact = exact_solution(self.s, t, x0)
+
+        fig, axes = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+
+        axes[0].plot(t, U_scri,  label="DG U at scri")
+        axes[0].plot(t, U_exact, label="Exact", linestyle="dashed")
+        axes[0].set_ylabel("U")
+        axes[0].legend()
+        axes[0].grid()
+
+        axes[1].plot(t, np.abs(U_scri - U_exact), label="|error|")
+        axes[1].set_ylabel("|U - U_exact|")
+        axes[1].set_xlabel("τ")
+        axes[1].legend()
+        axes[1].grid()
+
+        plt.suptitle(f"Waveform at ρ=s (D={self.D}, N={self.N})")
+        plt.tight_layout()
+
+        if filename is None:
+            filename = f"graphs/scri_waveform_D{self.D}_N{self.N}.png"
+        plt.savefig(filename, dpi=300)
+        plt.close()
+
+    # ------------------------------------------------------------------
+    # Probe logger
+    # ------------------------------------------------------------------
+
+    def init_probe_logger(self, filename: str = "probe.csv") -> None:
+        self.probe_file    = filename
         self._probe_buffer = []
-    
-    def log_probe(self, t: float):
-        self._probe_buffer.append((t, self.u[-1, -1, 0], self.u[-1, -1, 1], self.u[-1, -1, 2]))
-    
-    def flush_probe(self):
-        data = np.array(self._probe_buffer)
-        np.savetxt(self.probe_file, data, delimiter=" ", header="t, u_edge, q_edge, p_edge", comments="")
 
+    def log_probe(self, t: float) -> None:
+        self._probe_buffer.append((
+            t,
+            self.u[-1, -1, 0],           # U  at ρ=s
+            self.u[-1, -1, 1],           # q  at ρ=s
+            self.u[-1, -1, 2],           # p  at ρ=s
+            self.u[-1, -2, 0],           # U  one node inward
+            self.u[self.D // 2, 0, 0],  # U  at domain midpoint
+        ))
 
-# ------------------------------------------------------------------
-# Problem setup
-# ------------------------------------------------------------------
+    def flush_probe(self) -> None:
+        np.savetxt(
+            self.probe_file,
+            np.array(self._probe_buffer),
+            delimiter=" ",
+            header="t u_scri q_scri p_scri u_in u_mid u_scri_exact",
+            comments="",
+        )
+
+def exact_solution(x: npt.NDArray, t: npt.NDArray, x0: float = 10.0) -> npt.NDArray:
+    """
+    Exact solution for V = 6/r² with outgoing wave initial data.
+    ψ(t,r) = f''(t-r) + (3/r)*f'(t-r) + (3/r²)*f(t-r)
+    At ρ=s (r→∞) only f'' survives.
+    """
+    u = t - x + x0   # retarded time argument, note sign: t - r not r - t
+
+    f     =  np.sin(u) * np.exp(-u**2)
+    fp    =  (np.cos(u) - 2.0 * np.sin(u) * u) * np.exp(-u**2)
+    fpp   =  ((4.0*(u**2)-3.0)*np.sin(u)-4.0*u*np.cos(u)) * np.exp(-u**2)
+
+    return fpp + (3.0/x)*fp + (3.0/x**2)*f
+
+def exact_solution_at_rho(rho: npt.NDArray, tau: npt.NDArray, x0: float, Omega: npt.NDArray) -> npt.NDArray:
+    """
+    Exact solution at a point inside the hyperboloidal layer.
+    Converts (τ, ρ) → (t, r) before evaluating the (t,r) exact solution.
+    
+    r   = ρ / Ω(ρ)
+    t   = τ + h(ρ)   where h(ρ) = ρ - r* = ρ - r (flat space)
+    t-r = τ - ρ      (the outgoing characteristic is preserved)
+    """
+    u   = tau - rho + x0                 # retarded time: τ-ρ = t-r in flat space
+
+    f1   =  np.sin(u) * np.exp(-u**2)
+    fp1  =  (np.cos(u) - 2*u*np.sin(u)) * np.exp(-u**2)
+    fpp1 = (-3*np.sin(u) - 4*u*np.cos(u) + 4*u**2*np.sin(u)) * np.exp(-u**2)
+
+    return fpp1 + (3.0 * Omega / rho) * fp1 + (3.0 * (Omega / rho)**2) * f1
 
 def initial_state(
-    x: npt.NDArray[np.float64]
+    x: npt.NDArray[np.float64],
 ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]]:
     """
-    Initial state.
+    Right-moving Gaussian initial data.
 
-    Returns
-    -------
-    f  : U(x, 0)
-    fx : dU/dx(x, 0) = q(x, 0)
-    g  : -dU/dt(x, 0) = p(x, 0)
+    Returns (f, fx, g) where
+        f= U(x, 0)
+        fx= dU/dx(x, 0)
+        g= p(x, 0) = -dU/dt(x, 0)
     """
-    f = np.exp(-0.5 * x**2)
-    fx = -x * np.exp(-0.5 * x**2)
-    g = -x * np.exp(-0.5 * x**2)
+
+    u = -x + 10.0
+    eps = 1e-5
+    f1     =  np.sin(u) * np.exp(-u**2)
+    fp1    =  (np.cos(u) - 2.0 * np.sin(u) * u) * np.exp(-u**2)
+    fpp1   =  ((4.0*(u**2)-3.0)*np.sin(u)-4.0*u*np.cos(u)) * np.exp(-u**2)
+
+    f = fpp1 + (3.0/x)*fp1 + (3.0/x**2)*f1
+
+    fx = (
+        -exact_solution(x + 2*eps, np.asarray(0.0), 10.0)
+        + 8*exact_solution(x +   eps, np.asarray(0.0), 10.0)
+        - 8*exact_solution(x -   eps, np.asarray(0.0), 10.0)
+        +   exact_solution(x - 2*eps, np.asarray(0.0), 10.0)
+    ) / (12.0 * eps)
+
+    g = -(
+        -exact_solution(x, np.asarray(2*eps), 10.0)
+        + 8*exact_solution(x, np.asarray(  eps), 10.0)
+        - 8*exact_solution(x, np.asarray( -eps), 10.0)
+        +   exact_solution(x, np.asarray(-2*eps), 10.0)
+    ) / (12.0 * eps)
+
     return f, fx, g
+
 
 def effective_potential(x: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
     """
-    Effective potential V(x). Appears as -V(x)*U in dp/dt.
-    Return zeros for the pure wave equation.
+    Effective potential V(x).  Enters as -V(x)*U in dp/dt.
+    Return zeros for the free wave equation.
     """
-    return np.zeros_like(x)
+    return 6.0/x**2
