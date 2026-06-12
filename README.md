@@ -48,7 +48,7 @@ corresponding to the $l=2$ centrifugal barrier of the flat-space scalar wave equ
 
 ## Hyperboloidal Layer
 
-The computational coordinate $\rho$ is related to the physical radius $r$ through
+As done in Vishal et al. (2024), the computational coordinate $\rho$ is related to the physical radius $r$ through
 
 $r = \frac{\rho}{\Omega(\rho)},$
 
@@ -213,8 +213,6 @@ Planned extensions include:
 - Pöschl-Teller scattering potentials
 - Quasinormal mode extraction
 - Black-hole perturbation potentials
-- Distributionally forced wave equations
-- Teukolsky-equation-inspired test problems
 - Investigation of long-range potential behavior under hyperboloidal compactification
 
 ---
@@ -223,19 +221,20 @@ Planned extensions include:
 
 ```python
 import numpy as np
-from HyperboloidalDG import HyperboloidalWaveDG
+import DG1DSolver
 
 x_grid = np.linspace(1.0, 50.0, 161)
 
-solver = HyperboloidalWaveDG(
+solver = DG1DSolver.DG1DSolver(
     x_grid=x_grid,
     N=4,
-    R=25.0,
+    R=30.0,
     P=4
 )
 
 solver.initialize_solution(initial_state)
 solver.run(T=60.0)
+```
 
 ## References
 
