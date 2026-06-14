@@ -115,14 +115,12 @@ for Dp in D_values:
     print(f"L2 Error for D={Dp} compared to exact: {err}")
 
     errors.append(err)
-    hs.append(h)
 
 
 # -------------------------
 # H-REFINEMENT RATES
 # -------------------------
 
-hs     = np.array(hs)
 errors = np.array(errors)   # (num_D, 3)
 
 orders_scri = np.log(errors[:-1, 0] / errors[1:, 0]) / np.log(2)
@@ -149,19 +147,23 @@ for i, p in enumerate(orders_mid):
 
 graph_base = f"graphs/convergence_{run_tag}_{timestamp}"
 
-labels = ["Scri", "Second-to-last", "Mid"]
+labels = ["Scri", "second-to-last", "Mid"]
+D_values = np.asarray(D_values)
 fig, ax = plt.subplots()
 for i, label in enumerate(labels):
-    ax.loglog(hs, errors[:, i], marker='o', label=label)
-ax.invert_xaxis()
-ax.set_xlabel("h")
-ax.set_ylabel("Relative L2 error")
+    ax.plot(np.log10(D_values), np.log10(errors[:, i]), marker='o', label=label)
+ref = errors[-1,0] * (D_values[-1]/D_values)**8
+ax.plot(np.log10(D_values), np.log10(ref), "--", label=r"$D^{-8}$")
+ref = errors[-1,-1] * (D_values[-1]/D_values)**5
+ax.plot(np.log10(D_values), np.log10(ref), "--", label=r"$D^{-5}$")
+ax.set_xlabel("$log_{10}$(No. of subdomains)")
+ax.set_ylabel("$log_{10}$(Relative L2 error)")
 ax.set_title(f"h-refinement convergence (N={N})")
 ax.legend()
 ax.grid(True, which="both")
 fig.savefig(f"{graph_base}_h_refinement.png", dpi=300)
 plt.show()
-
+plt.close()
 
 # -------------------------
 # P-REFINEMENT STUDY
@@ -241,3 +243,4 @@ ax.legend()
 ax.grid(True, which="both")
 fig.savefig(f"{graph_base}_p_refinement.png", dpi=300)
 plt.show()
+plt.close()

@@ -5,11 +5,8 @@ wave equation with a hyperboloidal layer. The code uses Gauss-Lobatto-Legendre
 (GLL) quadrature, Lagrange nodal basis functions, upwind numerical fluxes, and
 classical RK4 time integration.
 
-The hyperboloidal layer compactifies future null infinity ($\mathscr{I}^+$)
-to a finite coordinate location, allowing outgoing radiation to leave the domain
-without artificial outer boundary conditions.
-
-This implementation is based on methods from the literature listed in the References section below.
+The hyperboloidal layer compactifies future null infinity ($\mathscr{I}^+$ Scri)
+to a finite coordinate location. This implementation is based on methods from the literature listed in the References section below.
 
 The solver demonstrates:
 
@@ -17,6 +14,71 @@ The solver demonstrates:
 - Superconvergent behavior approaching $2N$ at $\mathscr{I}^+$.
 - Exponential convergence under $p$-refinement.
 - Stable propagation of outgoing waves through a hyperboloidal compactification layer.
+
+
+---
+
+## Convergence Results
+
+### h-refinement
+
+For fixed polynomial degree $N=4$, the solver exhibits the expected
+$N+1$ convergence rate at generic grid points and approximately $2N$
+superconvergence at future null infinity.
+
+Example:
+
+![h-refinement](graphs/hD_refinement.png)
+
+| D (elements) | Relative L2 Error at $Scri$ | $p \approx$ |
+|---|---|---|
+| 20  | 9.33e-01 |  N/A |
+| 40  | 2.98e-01 | 1.645|
+| 80  | 7.64e-03 | 5.288|
+| 160 | 3.86e-05 | 7.628|
+| 320 | 1.59e-07 | 7.920|
+
+Observed rates approach
+
+$p \approx 8$
+
+consistent with superconvergent DG behavior for $N=4$.
+
+---
+
+### p-refinement
+
+For fixed mesh resolution, errors decrease exponentially with increasing
+polynomial degree.
+
+Example:
+
+![p-refinement](graphs/p_refinement.png)
+
+| N | $\alpha$ at $Scri \approx$ |
+|---|---|
+| 2 | N/A |
+| 3 | 4.102 |
+| 4 | 4.727 |
+| 5 | 4.994 |
+| 6 | 5.083 |
+
+This confirms spectral convergence of the DG discretization.
+
+---
+
+## Features
+
+- Nodal DG formulation
+- Gauss-Lobatto-Legendre quadrature
+- Diagonal mass matrix
+- Strong-form DG differentiation
+- Exact upwind fluxes
+- Hyperboloidal compactification
+- Direct extraction of waveforms at $\mathscr{I}^+$
+- h-refinement studies
+- p-refinement studies
+- Exact-solution verification
 
 ---
 
@@ -143,66 +205,6 @@ At future null infinity,
 $U|_{\mathscr I^+} = f''(u),$
 
 since the $1/r$ and $1/r^2$ terms vanish.
-
----
-
-## Convergence Results
-
-### h-refinement
-
-For fixed polynomial degree $N=4$, the solver exhibits the expected
-$N+1$ convergence rate at generic grid points and approximately $2N$
-superconvergence at future null infinity.
-
-Example:
-
-| D (elements) | Relative L2 Error at $\mathscr{I}^+$ | $p \approx$ |
-|---|---|---|
-| 20  | 9.33e-01 |  N/A |
-| 40  | 2.98e-01 | 1.645|
-| 80  | 7.64e-03 | 5.288|
-| 160 | 3.86e-05 | 7.628|
-| 320 | 1.59e-07 | 7.920|
-
-Observed rates approach
-
-$p \approx 8,$
-
-consistent with superconvergent DG behavior for $N=4$.
-
----
-
-### p-refinement
-
-For fixed mesh resolution, errors decrease exponentially with increasing
-polynomial degree.
-
-Example:
-
-| N | Relative L2 Error at $\mathscr{I}^+$ |
-|---|---|
-| 2 | 2.64e-01 |
-| 3 | 4.36e-03 |
-| 4 | 3.86e-05 |
-| 5 | 2.62e-07 |
-| 6 | 1.62e-09 |
-
-This confirms spectral convergence of the DG discretization.
-
----
-
-## Features
-
-- Nodal DG formulation
-- Gauss-Lobatto-Legendre quadrature
-- Diagonal mass matrix
-- Strong-form DG differentiation
-- Exact upwind fluxes
-- Hyperboloidal compactification
-- Direct extraction of waveforms at $\mathscr{I}^+$
-- h-refinement studies
-- p-refinement studies
-- Exact-solution verification
 
 ---
 

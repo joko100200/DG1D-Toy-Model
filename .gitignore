@@ -1,5 +1,3 @@
-*.png
-graphs/
 logs/
 probes/
 *.txt
