@@ -1,7 +1,9 @@
 import numpy as np
 import numpy.typing as npt
 from numpy.polynomial.legendre import Legendre
+from scipy.special import lambertw
 from collections.abc import Callable
+from scipy.optimize import curve_fit
 
 
 class DG1DSolver:
@@ -17,7 +19,7 @@ class DG1DSolver:
 
     The domain consists of a standard physical region and a hyperboloidal layer
     which compactifies future null infinity (scri+) to the finite coordinate
-    location ρ = s.
+    location rho = s.
 
     The discretization uses:
         - Gauss-Lobatto-Legendre nodes
@@ -38,7 +40,9 @@ class DG1DSolver:
         L: int,
         R: float,
         P: int,
-        outputfileDir: str,
+        M: float = 0.0,
+        ll: int = 2,
+        outputfileDir: str = "probes/tmp.csv",
     ):
         self.D = len(x_grid) - 1
         self.N = N
@@ -55,7 +59,7 @@ class DG1DSolver:
 
         self.R = self.x[np.argmin(np.abs(self.x - R))]   # snap R to nearest grid interface
         self.P = P
-        self.s = self.x[-1]                               # future null infinity ρ = s
+        self.s = self.x[-1]                               # future null infinity rho = s
 
         self.xi_nodes     = self.gauss_lobatto_nodes()
         self.quad_weights = self.gauss_lobatto_weights()  # shape (N+1,)
@@ -68,14 +72,12 @@ class DG1DSolver:
 
         self.x_nodes    = self.reconstruct_x_at_nodes()    # (D, N+1)
 
-        self.V_at_nodes = effective_potential(self.x_nodes) # (D, N+1)
         self.H_at_nodes = self.compute_H()                  # (D, N+1)
-        self.coeff_at_nodes = 1.0 / (1.0 + self.H_at_nodes)   # (D, N+1), = 1/2 at ρ=s
+        self.V_at_nodes = self.effective_potential(self.x_nodes, ll, M) # (D, N+1)
+        self.coeff_at_nodes = 1.0 / (1.0 + self.H_at_nodes)   # (D, N+1), = 1/2 at rho=s
         
-        # J*V precomputed analytically to avoid 0/0 at ρ=s where H→1
+        # JV_at_nodes is V/(1-H^2) = 1/(1+H) * (V/(1-H)) = 1/(1+H) * V/omega^2 * (omega - rho*omega')
         self.JV_at_nodes = self.coeff_at_nodes * self.V_at_nodes * self.hyperboloidal_denom
-
-        
 
     # ------------------------------------------------------------------
     # Basis and quadrature
@@ -162,15 +164,50 @@ class DG1DSolver:
         denom        = Omega - rho[layer] * Omega_prime
 
         # Superstius forcing analytical limits near rho = s. Unneeded but no harm.
-        near_scri        = sigma > (1.0 - 1e-12)
-        denom[near_scri] = self.s * self.P / (self.s - self.R)
-        Omega[near_scri] = 0.0
+        #near_scri        = sigma > (1.0 - 1e-5)
+        #denom[near_scri] = self.s * self.P / (self.s - self.R)
+        #Omega[near_scri] = 0.0
 
         self.hyperboloidal_denom[layer] = denom
         self.Omega[layer] = Omega
         H[layer] = 1.0 - Omega**2 / denom
         return H
 
+    def effective_potential(self, x: npt.NDArray[np.float64], ell: int, M: float) -> npt.NDArray[np.float64]:
+        """
+        The effective regge-welli potential calculated in two regions, pre hyperbolodial layer, post 
+        x<R; x=rho=r*
+        r radial coordinate
+        self.Omega = 1 x<R so equation is unchanged
+
+        x>R; r approx r* = rho/omega = x/omega 
+        """
+        if M == 0:
+            return ell*(ell+1) / x**2
+        
+        # find closest grid point where Omega > 0.1
+        Omega_Threshold = 0.001
+        Omega_flat = self.Omega.reshape(-1)
+
+        Threshold_idx_flat = np.argmin(np.abs(Omega_flat - Omega_Threshold))
+
+        Threshold_idx = np.unravel_index(Threshold_idx_flat, self.Omega.shape)[0]
+
+        Omega_Limit = (np.arange(self.x_nodes.shape[0])[:, None] < Threshold_idx) * np.ones((1, self.x_nodes.shape[1]), dtype=bool)
+
+        Omega_safe = np.where(Omega_Limit, self.Omega, 1.0)
+        r_star_rho = x / Omega_safe 
+         
+        r = np.where(Omega_Limit, r_of_rstar(r_star_rho, M), r_star_rho)
+
+        Omega_2 = np.where(Omega_Limit, self.Omega**2, 1.0)
+        V_r = (1 - 2*M/r) * (ell*(ell+1)/r**2 - 6*M/r**3) / Omega_2
+        V_rho = (1 - 2*M*self.Omega/r) * (ell*(ell+1)/r**2 - 6*M*self.Omega/r**3)
+
+        V_return = np.where(Omega_Limit, V_r, V_rho)
+
+        return V_return
+    
     # ------------------------------------------------------------------
     # Grid reconstruction
     # ------------------------------------------------------------------
@@ -190,7 +227,7 @@ class DG1DSolver:
             dx = self.x[j + 1] - self.x[j]
             x_nodes[j] = self.x[j] + 0.5 * dx * (self.xi_nodes + 1.0)
         return x_nodes
-
+    
     # ------------------------------------------------------------------
     # Initial conditions
     # ------------------------------------------------------------------
@@ -263,7 +300,7 @@ class DG1DSolver:
         p_plus_R[-1] = p_minus_R[-1]
         q_plus_R[-1] = q_minus_R[-1]
 
-        # global left boundary: reflecting
+        # global left boundary: incoming (no outflow state)
         p_minus_L[0] = -p_plus_L[0]
         q_minus_L[0] = -q_plus_L[0]
 
@@ -284,7 +321,7 @@ class DG1DSolver:
 
         # Hyperboloidal coupling
         H     = self.H_at_nodes
-        coeff = self.coeff_at_nodes       # 1/(1+H), finite at ρ=s
+        coeff = self.coeff_at_nodes       # 1/(1+H), finite at rho=s
         JVU   = self.JV_at_nodes * U      # J*V precomputed to avoid 0/0
 
         dudt = np.zeros_like(u)
@@ -305,8 +342,8 @@ class DG1DSolver:
         Currently fixed to 1e-3 for convergence studies. The CFL-based
         estimate is retained below for future use.
         """
-        #return float(cfl * np.min(self.h) / (2 * self.N + 1))
-        return 0.001
+        return float(cfl * np.min(self.h) / (2 * self.N + 1))
+        #return 0.001
 
     def step_rk4(self, dt: float) -> None:
         u0 = self.u.copy()
@@ -324,6 +361,9 @@ class DG1DSolver:
         # Time solution plots if needed
         plot_times = []
         plot_idx = 0
+        exact_bool = False
+
+        t_idx = 20.0
 
         while t < T:
             dt = min(dt, T - t)
@@ -332,9 +372,13 @@ class DG1DSolver:
 
             while plot_idx < len(plot_times) and t >= plot_times[plot_idx]:
                 pt = plot_times[plot_idx]
-                self.plot_solution(t, f"graphs/{self.D}_WaveEquation_t{pt:.0f}.png")
+                self.plot_solution(t, f"graphs/{self.D}_WaveEquation_t{pt:.0f}.png", exact_bool)
                 plot_idx += 1
 
+            if t >= t_idx and not t==T:
+                #print(f"t = {t:.1f} | L2Norm = {self.compute_L2_norm():.6e} | E = {self.compute_energy():.6e}")
+                print(f"t = {t:.1f}")
+                t_idx += 20.0
 
             self.log_probe(t)
 
@@ -347,7 +391,7 @@ class DG1DSolver:
     # ------------------------------------------------------------------
 
     def compute_energy(self) -> float:
-        """E = 0.5 * integral (p² + q² + V·U²) dρ"""
+        """E = 0.5 * integral (p² + q² + V·U²) drho"""
         U = self.u[:, :, 0]
         q = self.u[:, :, 1]
         p = self.u[:, :, 2]
@@ -369,7 +413,7 @@ class DG1DSolver:
         return float(np.sqrt(np.sum(self.quad_weights * U**2 * self.h[:, None])))
 
     def waveform_at_scri(self) -> tuple[float, float, float]:
-        """U, q, p at the last node of the last element (ρ = s)."""
+        """U, q, p at the last node of the last element (rho = s)."""
         return (self.u[-1, -1, 0], self.u[-1, -1, 1], self.u[-1, -1, 2])
 
     def L2_error_probe_state_diff(self) -> tuple[float, float, float]:
@@ -378,7 +422,7 @@ class DG1DSolver:
 
         Returns
         -------
-        (E_scri, E_in, E_mid) : relative L2 norms at ρ=s, one node inward, domain midpoint.
+        (E_scri, E_in, E_mid) : relative L2 norms at rho=s, one node inward, domain midpoint.
         """
         data = np.asarray(self._probe_buffer)
         t    = data[:, 0]
@@ -418,12 +462,15 @@ class DG1DSolver:
         print(f"Projection error q: {np.sqrt(np.mean((self.u[:,:,1] - fx)**2)):.6e}")
         print(f"Projection error p: {np.sqrt(np.mean((self.u[:,:,2] - g )**2)):.6e}")
 
-    def plot_solution(self, t: float, filename: str = "graphs/DG_wave_solution.png") -> None:
+    def plot_solution(self, t: float, filename: str = "graphs/DG_wave_solution.png", plot_exact: bool = True) -> None:
         import matplotlib.pyplot as plt
 
         x_dense = self.reconstruct_x().reshape(-1)
+        x_sparse = self.x_nodes.reshape(-1)
+
         U_dense = (self.u[:, :, 0] @ self.Phi_plot).reshape(-1)
-        U_exact_dense = exact_solution_at_rho(x_dense, np.asarray(t), 10.0, self.Omega)
+        JV_sparse = self.JV_at_nodes.reshape(-1)
+        if plot_exact: U_exact_dense = exact_solution_at_rho(x_dense, np.asarray(t), 10.0, self.Omega)
 
         q_dense = (self.u[:, :, 1] @ self.Phi_plot).reshape(-1)
         p_dense = (self.u[:, :, 2] @ self.Phi_plot).reshape(-1)
@@ -431,7 +478,8 @@ class DG1DSolver:
         fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
 
         axes[0].plot(x_dense, U_dense, label="DG U")
-        axes[0].plot(x_dense, U_exact_dense, label="Exact U", linestyle="dashed")
+        #axes[0].plot(x_sparse, JV_sparse, label=r"V/(1-$H^2$)", linestyle="dashed")
+        if plot_exact: axes[0].plot(x_dense, U_exact_dense, label="Exact U", linestyle="dashed")
         axes[0].set_ylabel("U")
         axes[0].legend()
         axes[0].grid()
@@ -442,6 +490,7 @@ class DG1DSolver:
             ax.legend()
             ax.grid()
         axes[-1].set_xlabel("x")
+
         plt.suptitle(f"Wave equation DG solution at t={t:.3f}")
         plt.tight_layout()
         plt.savefig(filename, dpi=300)
@@ -450,7 +499,7 @@ class DG1DSolver:
     
     def plot_scri_waveform(self, x0: float = 10.0, filename : str = "Scri_WaveForm_L2Error.png") -> None:
         """
-        Plot the extracted waveform at ρ=s against the exact solution.
+        Plot the extracted waveform at rho=s against the exact solution.
         """
         import matplotlib.pyplot as plt
 
@@ -474,13 +523,144 @@ class DG1DSolver:
         axes[1].legend()
         axes[1].grid()
 
-        plt.suptitle(f"Waveform at ρ=s (D={self.D}, N={self.N})")
+        plt.suptitle(f"Waveform at rho=s (D={self.D}, N={self.N})")
         plt.tight_layout()
 
         if filename is None:
             filename = f"graphs/scri_waveform_D{self.D}_N{self.N}.png"
         plt.savefig(filename, dpi=300)
         plt.close()
+
+    def plot_RingDown(self):
+        import matplotlib.pyplot as plt
+
+        data = np.asarray(self._probe_buffer)
+        t = data[:, 0]
+        u = data[:, 1]
+
+        t0_list = np.arange(100, 150, 1)
+
+        omega_R_list = []
+        omega_I_list = []
+        U_err_list = []
+
+        for t0 in t0_list:
+            window_size = 150
+            mask = (t >= t0) & (t <= t0 + window_size)
+
+            if np.sum(mask) < 10:
+                continue
+
+            t_fit = t[mask] - t[mask][0]
+            u_fit = u[mask]
+
+            # Initial guesses
+            A0 = np.max(np.abs(u_fit))
+            alpha0 = 0.08
+            omega0 = 0.37
+            phi0 = 0.0
+
+            try:
+                popt, pcov = curve_fit(
+                    qnm_model,
+                    t_fit,
+                    u_fit,
+                    p0=[A0, alpha0, omega0, phi0]
+                )
+                A, alpha, omega, phi = popt
+                perr = (np.sqrt(np.diag(pcov))[1], np.sqrt(np.diag(pcov))[2])
+
+                omega_R_list.append(omega)
+                omega_I_list.append(alpha)
+                U_err_list.append(perr)
+
+            except RuntimeError:
+                continue
+        
+        U_err_list = np.asarray(U_err_list)
+
+        # ==============================
+        # PLOTS: QNM STABILITY
+        # ==============================
+
+        plt.figure(figsize=(8,5))
+        plt.plot(t0_list[:len(omega_R_list)], omega_R_list, marker='o')
+        plt.axhline(0.37367, linestyle='--', label="Exact ωR")
+        plt.xlabel(r"$t_0$")
+        plt.ylabel(r"$\omega_R$")
+        plt.title("QNM Frequency Stability Test (Real part)")
+        plt.grid(True)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig("graphs/qnm_omegaR_stability.png")
+        plt.close()
+
+        plt.figure(figsize=(8,5))
+        plt.plot(t0_list[:len(omega_I_list)], omega_I_list, marker='o')
+        plt.axhline(0.08896, linestyle='--', label="Exact ωI")
+        plt.xlabel(r"$t_0$")
+        plt.ylabel(r"$\omega_I$")
+        plt.title("QNM Decay Rate Stability Test")
+        plt.grid(True)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig("graphs/qnm_omegaI_stability.png")
+        plt.close()
+
+        plt.figure(figsize=(8,5))
+        plt.plot(t0_list[:len(U_err_list[:, 0])], U_err_list[:, 0], marker='o', label=r"$\omega_I$")
+        plt.plot(t0_list[:len(U_err_list[:, 0])], U_err_list[:, 1], marker='o', label=r"$\omega_R$")
+        plt.xlabel(r"$t_0$")
+        plt.ylabel(r"$\sigma$")
+        plt.title("QNM fit error")
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig("graphs/qnm_fit_stability.png")
+        plt.close()
+
+
+    def plot_tail(self):
+        import matplotlib.pyplot as plt
+
+        data = np.asarray(self._probe_buffer)
+        t = data[:, 0]
+        #mask = (t >= 320) & (t <= 390)
+        mask = (t >= 320) & (t <= 600)
+        t = t[mask] - self.s + 35.0
+        u = data[:, 1][mask]
+
+        log_t = np.log(t)
+        log_u = np.log(np.abs(u))
+
+        plt.plot(log_t, log_u)
+        plt.plot(log_t, -6 * log_t + 22.85)
+        plt.plot(log_t, -0.08896*t + 13.5)
+
+        # fit slope
+        coeffs = np.polyfit(log_t, log_u, 1)
+        print(f"Measured tail slope: {coeffs[0]:.4f} (expected -6.0)")
+
+        plt.legend
+        plt.savefig("graphs/Asymptotics.png")
+        plt.show()
+        plt.close()
+
+    def FFT_scri(self):
+        import matplotlib.pyplot as plt
+        data = np.asarray(self._probe_buffer)
+        t = data[:, 0]
+        mask = (t >= 140) & (t <= 600)
+        u = data[:, 1][mask]
+        
+        dt = t[1] - t[0]  # sample spacing
+        u_prime = np.fft.rfft(u)
+        freq = np.fft.rfftfreq(len(u), d=dt) * 2*np.pi
+
+        plt.plot(freq, np.abs(u_prime))
+        plt.xlabel("Frequency")
+        plt.ylabel("|u'|")
+        plt.show()
 
     # ------------------------------------------------------------------
     # Probe logger
@@ -493,9 +673,9 @@ class DG1DSolver:
     def log_probe(self, t: float) -> None:
         self._probe_buffer.append((
             t,
-            self.u[-1, -1, 0],           # U  at ρ=s
-            self.u[-1, -1, 1],           # q  at ρ=s
-            self.u[-1, -1, 2],           # p  at ρ=s
+            self.u[-1, -1, 0],           # U  at rho=s
+            self.u[-1, -1, 1],           # q  at rho=s
+            self.u[-1, -1, 2],           # p  at rho=s
             self.u[-1, -2, 0],           # U  one node inward
             self.u[self.D // 2, 0, 0],  # U  at domain midpoint
         ))
@@ -541,7 +721,7 @@ def exact_solution_at_rho(rho: npt.NDArray, tau: npt.NDArray, x0: float, Omega: 
         t - r = τ - rho,
 
     the exact solution can be evaluated directly as a function of
-    (τ,ρ) without explicitly constructing t or r.
+    (τ,rho) without explicitly constructing t or r.
     """
     u   = tau - rho + x0
 
@@ -591,10 +771,40 @@ def initial_state(
 
     return f, fx, g
 
+def gaussian_pulse(
+        x: npt.NDArray[np.float64]
+    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]]:
 
-def effective_potential(x: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+    r0 = -35.0
+    sigma = 5.0
+    A = 10000.0
+
+    u = (-x + r0) / (2.0 * sigma)
+    f  = A * np.exp(-u**2)
+    fx = A * (u / sigma) * np.exp(-u**2) 
+    g = fx
+
+    return f, fx, g
+
+def r_of_rstar(rstar: npt.NDArray[np.float64], M: float) -> npt.NDArray[np.float64]:
     """
-    Effective potential for l=2 flat space wave equation. 
-        V(r) = 6/r^2
+    Computes r(r*) for Schwarzschild via Lambert W, with asymptotic fallback for large r*.
+    For large r*: r ≈ r* + 2M*ln(r*/2M) + ... ≈ r* to leading order
     """
-    return 6.0/x**2
+    if M == 0:
+        return rstar
+    
+    z = rstar / (2*M) - 1  # the exponent
+    large_z = z > 500  # exp(500) is near float64 overflow
+
+    w_asymptotic = z - np.log(np.abs(z))  # leading order W(e^z) ≈ z - ln(z) + ln(z)/z + ...
+    w_lambert = lambertw(np.exp(np.where(large_z, 0.0, z))).real  # safe for small z
+
+    w = np.where(large_z, w_asymptotic, w_lambert)
+    r_lambert = 2*M * (1 + w)
+    
+    return r_lambert
+
+def qnm_model(t, A, alpha, omega, phi):
+    return A * np.exp(-alpha*t) * np.cos(omega*t + phi)
+

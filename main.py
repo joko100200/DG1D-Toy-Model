@@ -39,9 +39,9 @@ class Tee:
 
 N           = 4
 L           = 100
-left_bound  = 1.0
-right_bound = 50.0
-R           = 30.0
+left_bound  = -20.0
+right_bound = 70.0
+R           = 50.0
 P           = 4
 T           = 60.0
 cfl         = 0.001
@@ -99,7 +99,7 @@ for Dp in D_values:
         print(f"\n{'='*30}")
         print(f"Probe '{probe_path}' found. Loading...")
         print(f"\n{'='*30}")
-        solver = DG1DSolver.DG1DSolver(x_grid, N, L, R, P, probe_path)
+        solver = DG1DSolver.DG1DSolver(x_grid, N, L, R, P, outputfileDir=probe_path)
         coarse_probe = np.loadtxt(probe_path, delimiter=" ", skiprows=1)
         solver._probe_buffer = coarse_probe.tolist()
     else:
@@ -107,7 +107,7 @@ for Dp in D_values:
         print(f"Running D = {Dp}, N = {N}")
         print(f"{'='*30}")
 
-        solver = DG1DSolver.DG1DSolver(x_grid, N, L, R, P, probe_path)
+        solver = DG1DSolver.DG1DSolver(x_grid, N, L, R, P, outputfileDir=probe_path)
         solver.initialize_solution(DG1DSolver.initial_state)
         solver.run(T, cfl)
 
@@ -186,14 +186,14 @@ for Np in N_values:
         print(f"\n{'='*30}")
         print(f"Probe '{probe_path}' found. Loading...")
         print(f"\n{'='*30}")
-        solver = DG1DSolver.DG1DSolver(x_grid, Np, L, R, P, probe_path)
+        solver = DG1DSolver.DG1DSolver(x_grid, Np, L, R, P, outputfileDir=probe_path)
         coarse_probe = np.loadtxt(probe_path, delimiter=" ", skiprows=1)
         solver._probe_buffer = coarse_probe.tolist()
     else:
         print(f"\n{'='*30}")
         print(f"Running D = {D}, N = {Np}")
         print(f"\n{'='*30}")
-        solver = DG1DSolver.DG1DSolver(x_grid, Np, L, R, P, probe_path)
+        solver = DG1DSolver.DG1DSolver(x_grid, Np, L, R, P, outputfileDir=probe_path)
         solver.initialize_solution(DG1DSolver.initial_state)
         solver.run(T, cfl)
     
